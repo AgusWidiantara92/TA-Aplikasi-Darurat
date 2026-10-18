@@ -1,5 +1,12 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../../../core/constants/app_colors.dart';
+import '../../../core/routing/manet_routing_engine.dart';
+import '../../../core/routing/message_envelope.dart';
+import '../../../core/routing/routing_holder.dart';
+import '../../../core/transport/mesh_transport.dart';
+import '../../../core/transport/transport_holder.dart';
+import '../../../core/transport/transport_payload_envelope.dart';
 import '../../../core/widgets/status_badge.dart';
 import '../data/repositories/chat_repository.dart';
 import '../models/chat_message.dart';
@@ -12,6 +19,9 @@ class ChatDetailScreen extends StatefulWidget {
   final String? conversationId;
   final List<ChatMessage>? initialMessages;
   final ChatRepository? repository;
+  final MeshTransport? transport;
+  final String? peerEndpointId;
+  final ManetRoutingEngine? routingEngine;
 
   const ChatDetailScreen({
     super.key,
@@ -21,6 +31,9 @@ class ChatDetailScreen extends StatefulWidget {
     this.conversationId,
     this.initialMessages,
     this.repository,
+    this.transport,
+    this.peerEndpointId,
+    this.routingEngine,
   });
 
   @override
@@ -32,12 +45,30 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   final ScrollController _scrollController = ScrollController();
 
   late ChatRepository _repository;
+  late MeshTransport _transport;
+  late ManetRoutingEngine _routingEngine;
+  StreamSubscription<MessageEnvelope>? _incomingEnvelopeSub;
+  StreamSubscription<TransportPayload>? _payloadSub;
   late List<ChatMessage> _messages;
 
   @override
   void initState() {
     super.initState();
     _repository = widget.repository ?? ChatRepositoryHolder.instance;
+    _transport = widget.transport ?? MeshTransportHolder.instance;
+    _routingEngine = widget.routingEngine ?? ManetRoutingHolder.instance;
+
+    if (widget.peerEndpointId != null) {
+      _routingEngine.neighborTable.registerConnectedEndpoint(
+        endpointId: widget.peerEndpointId!,
+        endpointName: widget.conversationTitle,
+      );
+      _routingEngine.neighborTable.mapIdentity(
+        endpointId: widget.peerEndpointId!,
+        nodeId: widget.nodeId,
+        nodeName: widget.conversationTitle,
+      );
+    }
 
     if (widget.initialMessages != null) {
       _messages = List<ChatMessage>.from(widget.initialMessages!);
@@ -53,6 +84,133 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       _messages = [];
       _loadMessagesFromRepo();
     }
+
+    _listenToIncomingPayloads();
+  }
+
+  void _listenToIncomingPayloads() {
+    // 1. Dengarkan pesan dari mesin routing MANET (multi-hop / flooding)
+    _incomingEnvelopeSub = _routingEngine.incomingMessagesStream.listen((
+      envelope,
+    ) {
+      if (!mounted) return;
+      if (envelope.type != MessageEnvelope.typeChat) return;
+
+      final isBroadcastScreen =
+          widget.conversationId == 'broadcast-all' ||
+          widget.nodeId.contains('ALL-NODES') ||
+          widget.conversationTitle.contains('Siaran');
+      final isEnvelopeBroadcast = envelope.recipientId == 'BROADCAST';
+
+      final bool isRelevant;
+      if (isBroadcastScreen) {
+        isRelevant = isEnvelopeBroadcast;
+      } else {
+        isRelevant =
+            !isEnvelopeBroadcast &&
+            (widget.nodeId == envelope.senderId ||
+                widget.nodeId.contains(envelope.senderId) ||
+                envelope.senderId.contains(widget.nodeId));
+      }
+
+      if (!isRelevant) return;
+
+      final messageId =
+          envelope.payload['messageId'] as String? ?? envelope.envelopeId;
+      if (_messages.any((m) => m.id == messageId)) return;
+
+      final text = envelope.payload['text'] as String? ?? '';
+      final timeStr = envelope.payload['time'] as String? ?? 'Baru saja';
+      final isEmergency = envelope.payload['isEmergency'] as bool? ?? false;
+
+      TelemetryData? telemetry;
+      if (envelope.payload['telemetry'] != null &&
+          envelope.payload['telemetry'] is Map<String, dynamic>) {
+        try {
+          telemetry = TelemetryData.fromJson(
+            envelope.payload['telemetry'] as Map<String, dynamic>,
+          );
+        } catch (_) {}
+      }
+
+      final hopInfo = envelope.hopCount > 0
+          ? 'Relay melalui ${envelope.hopCount} hop: [${envelope.routeTrace.join(' → ')}]'
+          : 'Transmisi 1-Hop Langsung';
+
+      final incomingMsg = ChatMessage(
+        id: messageId,
+        senderName: envelope.senderName,
+        text: text,
+        time: timeStr,
+        isMe: false,
+        isEmergency: isEmergency,
+        relayInfo: hopInfo,
+        statusText: isEnvelopeBroadcast
+            ? 'Diterima (Siaran Multi-Hop)'
+            : (envelope.hopCount > 0
+                  ? 'Diterima (${envelope.hopCount}-Hop Relay)'
+                  : 'Diterima (1-Hop Langsung)'),
+        telemetryData: telemetry,
+      );
+
+      setState(() {
+        _messages.add(incomingMsg);
+      });
+
+      _scrollToBottom();
+    });
+
+    // 2. Fallback: Tangani payload 1-hop lawas jika ada
+    _payloadSub = _transport.payloadStream.listen((payload) {
+      if (!mounted) return;
+      final envelope = OneHopPayloadEnvelope.fromBytes(payload.bytes);
+      if (envelope == null) return;
+      if (_messages.any((m) => m.id == envelope.messageId)) return;
+
+      final isRelevant =
+          widget.peerEndpointId == null ||
+          widget.peerEndpointId == payload.endpointId ||
+          widget.nodeId.contains(envelope.senderNodeId);
+
+      if (isRelevant && envelope.text.isNotEmpty) {
+        final now = DateTime.now();
+        final timeStr =
+            '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+
+        final incomingMsg = ChatMessage(
+          id: envelope.messageId,
+          senderName: envelope.senderName,
+          text: envelope.text,
+          time: timeStr,
+          isMe: false,
+          statusText: 'Diterima (1-Hop Langsung)',
+          telemetryData: envelope.telemetry,
+        );
+
+        setState(() {
+          _messages.add(incomingMsg);
+        });
+
+        final targetConvId = _resolveConversationId();
+        if (targetConvId != null) {
+          _repository.saveMessage(targetConvId, incomingMsg);
+        }
+
+        _scrollToBottom();
+      }
+    });
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
   }
 
   Future<void> _loadMessagesFromRepo() async {
@@ -97,14 +255,52 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     final timeStr =
         '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
 
+    final isBroadcast =
+        widget.nodeId.contains('ALL-NODES') ||
+        widget.conversationTitle.contains('Siaran') ||
+        widget.conversationId == 'broadcast-all';
+
+    final recipientNodeId = isBroadcast ? 'BROADCAST' : widget.nodeId;
+
+    final envelope = await _routingEngine.sendChatMessage(
+      recipientNodeId: recipientNodeId,
+      text: text,
+      telemetry: telemetry,
+      isEmergency: widget.isEmergency,
+    );
+
+    // Tentukan status teks berdasarkan status perutean
+    String statusText;
+    final isDirectNeighbor =
+        _routingEngine.neighborTable.getEndpointIdForNode(recipientNodeId) !=
+        null;
+    if (isDirectNeighbor) {
+      statusText = 'Terkirim (1-Hop Langsung)';
+    } else if (_routingEngine.neighborTable.activeNeighbors.isNotEmpty) {
+      statusText = isBroadcast
+          ? 'Disiarkan (Relay Multi-Hop)'
+          : 'Diteruskan (Relay Multi-Hop)';
+    } else if (_routingEngine.storeAndForwardQueue.contains(
+      envelope.envelopeId,
+    )) {
+      statusText = 'Mengantre di Buffer Mesh';
+    } else {
+      statusText = 'Tersimpan Lokal (Simulasi)';
+    }
+
+    final messageId =
+        envelope.payload['messageId'] as String? ??
+        'user-${DateTime.now().millisecondsSinceEpoch}';
+
     final newMessage = ChatMessage(
-      id: 'user-${DateTime.now().millisecondsSinceEpoch}',
+      id: messageId,
       senderName: 'Anda',
       text: text,
       time: timeStr,
       isMe: true,
-      statusText: 'Tersimpan Lokal (Simulasi)',
+      statusText: statusText,
       telemetryData: telemetry,
+      isEmergency: widget.isEmergency,
     );
 
     setState(() {
@@ -119,19 +315,13 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       await _repository.saveMessage(targetConvId, newMessage);
     }
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-        );
-      }
-    });
+    _scrollToBottom();
   }
 
   @override
   void dispose() {
+    _incomingEnvelopeSub?.cancel();
+    _payloadSub?.cancel();
     _messageController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -582,7 +772,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             Padding(
               padding: const EdgeInsets.only(top: 4, left: 4, right: 4),
               child: Text(
-                msg.relayInfo ?? msg.statusText ?? '',
+                msg.relayInfo != null && msg.statusText != null
+                    ? '${msg.statusText} • ${msg.relayInfo}'
+                    : (msg.relayInfo ?? msg.statusText ?? ''),
                 style: const TextStyle(
                   fontSize: 10,
                   color: AppColors.textMuted,

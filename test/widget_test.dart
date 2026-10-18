@@ -2,12 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:siagamesh_app/app.dart';
+import 'package:siagamesh_app/core/transport/fake_mesh_transport.dart';
+import 'package:siagamesh_app/core/transport/transport_holder.dart';
 import 'package:siagamesh_app/features/chat/data/repositories/chat_repository.dart';
 
 void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues({});
     ChatRepositoryHolder.setInstance(LocalChatRepository());
+    MeshTransportHolder.setInstance(FakeMeshTransport());
   });
 
   testWidgets('SiagaMesh initial smoke test', (WidgetTester tester) async {
@@ -214,8 +217,8 @@ void main() {
     await tester.tap(find.text('Perangkat'));
     await tester.pumpAndSettle();
 
-    // Drag sedikit ke atas untuk melihat node Posko Relawan Utama
-    await tester.drag(find.byType(ListView), const Offset(0, -200));
+    // Drag ke atas untuk melihat node Posko Relawan Utama
+    await tester.drag(find.byType(ListView), const Offset(0, -450));
     await tester.pumpAndSettle();
 
     // Klik tombol Kirim Pesan pada node Posko Relawan Utama
@@ -231,7 +234,7 @@ void main() {
     await tester.pumpAndSettle();
 
     // Drag lebih lanjut ke bawah untuk melihat node Galaxy A54
-    await tester.drag(find.byType(ListView), const Offset(0, -250));
+    await tester.drag(find.byType(ListView), const Offset(0, -400));
     await tester.pumpAndSettle();
 
     expect(find.text('Hubungkan'), findsOneWidget);

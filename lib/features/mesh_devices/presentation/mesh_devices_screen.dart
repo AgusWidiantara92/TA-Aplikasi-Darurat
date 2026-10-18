@@ -1,5 +1,8 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../../../core/constants/app_colors.dart';
+import '../../../core/transport/mesh_transport.dart';
+import '../../../core/transport/transport_holder.dart';
 import '../../../core/widgets/app_header.dart';
 import '../../../core/widgets/status_badge.dart';
 import '../../chat/data/repositories/chat_repository.dart';
@@ -10,8 +13,9 @@ import 'widgets/radar_widget.dart';
 /// Layar Perangkat Terdekat & Radar sesuai referensi Layar 4 pada desain.jpg.
 class MeshDevicesScreen extends StatefulWidget {
   final ChatRepository? repository;
+  final MeshTransport? transport;
 
-  const MeshDevicesScreen({super.key, this.repository});
+  const MeshDevicesScreen({super.key, this.repository, this.transport});
 
   @override
   State<MeshDevicesScreen> createState() => _MeshDevicesScreenState();
@@ -21,13 +25,53 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
   bool _isScanning = false;
 
   late ChatRepository _repository;
+  late MeshTransport _transport;
+  StreamSubscription<List<DiscoveredPeer>>? _peersSub;
+  StreamSubscription<TransportConnectionEvent>? _eventsSub;
+  List<DiscoveredPeer> _physicalPeers = [];
+  bool _isAdvertising = false;
+  bool _isDiscovering = false;
   late List<MeshNode> _nodes;
 
   @override
   void initState() {
     super.initState();
     _repository = widget.repository ?? ChatRepositoryHolder.instance;
+    _transport = widget.transport ?? MeshTransportHolder.instance;
+    _isAdvertising = _transport.isAdvertising;
+    _isDiscovering = _transport.isDiscovering;
+    _physicalPeers = _transport.currentPeers;
+
+    _peersSub = _transport.discoveredPeersStream.listen((peers) {
+      if (!mounted) return;
+      setState(() {
+        _physicalPeers = peers;
+      });
+    });
+
+    _eventsSub = _transport.connectionEventsStream.listen((event) {
+      if (!mounted) return;
+      setState(() {
+        _physicalPeers = _transport.currentPeers;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '[Transport 1-Hop] ${event.endpointName}: ${event.status.name} ${event.details ?? ""}',
+          ),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    });
+
     _loadInitialNodes();
+  }
+
+  @override
+  void dispose() {
+    _peersSub?.cancel();
+    _eventsSub?.cancel();
+    super.dispose();
   }
 
   void _loadInitialNodes() {
@@ -114,6 +158,113 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
           nodeId: conv.nodeId,
           isEmergency: conv.isEmergency,
           repository: _repository,
+        ),
+      ),
+    );
+  }
+
+  void _toggleAdvertising() async {
+    if (_isAdvertising) {
+      await _transport.stopAdvertising();
+      if (!mounted) return;
+      setState(() {
+        _isAdvertising = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Siaran (Advertising) 1-hop dihentikan.'),
+          duration: Duration(seconds: 1),
+        ),
+      );
+    } else {
+      final success = await _transport.startAdvertising(
+        localNodeName:
+            'SiagaMesh-${DateTime.now().millisecondsSinceEpoch % 1000}',
+      );
+      if (!mounted) return;
+      setState(() {
+        _isAdvertising = success;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            success
+                ? 'Siaran (Advertising) 1-hop AKTIF.'
+                : 'Gagal mengaktifkan siaran (Periksa izin Bluetooth/Lokasi).',
+          ),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
+  void _toggleDiscovery() async {
+    if (_isDiscovering) {
+      await _transport.stopDiscovery();
+      if (!mounted) return;
+      setState(() {
+        _isDiscovering = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Pemindaian (Discovery) 1-hop dihentikan.'),
+          duration: Duration(seconds: 1),
+        ),
+      );
+    } else {
+      final success = await _transport.startDiscovery();
+      if (!mounted) return;
+      setState(() {
+        _isDiscovering = success;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            success
+                ? 'Pemindaian (Discovery) 1-hop AKTIF.'
+                : 'Gagal memulai pemindaian (Periksa izin Bluetooth/Lokasi).',
+          ),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
+  void _connectToPhysicalPeer(DiscoveredPeer peer) async {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Meminta koneksi 1-hop ke ${peer.endpointName}...'),
+        duration: const Duration(seconds: 1),
+      ),
+    );
+    await _transport.requestConnection(
+      endpointId: peer.endpointId,
+      localNodeName: 'SiagaMesh-User',
+    );
+  }
+
+  void _disconnectPhysicalPeer(DiscoveredPeer peer) async {
+    await _transport.disconnect(endpointId: peer.endpointId);
+  }
+
+  void _openChatWithPhysicalPeer(DiscoveredPeer peer) async {
+    final conv = await _repository.getOrCreateConversationForNode(
+      nodeId: 'peer-${peer.endpointId}',
+      nodeName: peer.endpointName,
+      isConnected: peer.status == PeerConnectionStatus.connected,
+    );
+    if (!mounted) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => ChatDetailScreen(
+          conversationId: conv.id,
+          conversationTitle: conv.title,
+          nodeId: conv.nodeId,
+          isEmergency: false,
+          repository: _repository,
+          transport: _transport,
+          peerEndpointId: peer.endpointId,
         ),
       ),
     );
@@ -232,6 +383,11 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
 
                   // Visualisasi Radar P2P
                   RadarWidget(blips: blips),
+
+                  const SizedBox(height: 18),
+
+                  // Bagian Eksperimen Transport Fisik 1-Hop
+                  _buildPhysicalTransportSection(),
 
                   const SizedBox(height: 18),
 
@@ -520,5 +676,284 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
         ),
       );
     }
+  }
+
+  Widget _buildPhysicalTransportSection() {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.accentBlue.withValues(alpha: 0.3)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.04),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      color: (_isAdvertising || _isDiscovering)
+                          ? AppColors.successGreen
+                          : AppColors.textMuted,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  const Text(
+                    'Transport Fisik 1-Hop',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                      color: AppColors.primaryNavy,
+                    ),
+                  ),
+                ],
+              ),
+              const StatusBadge(
+                label: 'Nearby P2P_CLUSTER',
+                backgroundColor: AppColors.accentPillBg,
+                textColor: AppColors.accentBlue,
+                fontSize: 9,
+                padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Eksperimen koneksi langsung antar-perangkat Android tanpa internet atau router.',
+            style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    backgroundColor: _isAdvertising
+                        ? AppColors.accentBlue.withValues(alpha: 0.1)
+                        : Colors.transparent,
+                    side: BorderSide(
+                      color: _isAdvertising
+                          ? AppColors.accentBlue
+                          : AppColors.borderLight,
+                    ),
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  onPressed: _toggleAdvertising,
+                  child: Text(
+                    _isAdvertising ? 'Siaran: AKTIF' : 'Mulai Siaran',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: _isAdvertising
+                          ? AppColors.accentBlue
+                          : AppColors.primaryNavy,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    backgroundColor: _isDiscovering
+                        ? AppColors.primaryNavy.withValues(alpha: 0.1)
+                        : Colors.transparent,
+                    side: BorderSide(
+                      color: _isDiscovering
+                          ? AppColors.primaryNavy
+                          : AppColors.borderLight,
+                    ),
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  onPressed: _toggleDiscovery,
+                  child: Text(
+                    _isDiscovering ? 'Pindai: AKTIF' : 'Mulai Pindai',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: AppColors.primaryNavy,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Text(
+            'Peer Fisik Terdeteksi (${_physicalPeers.length})',
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+              color: AppColors.primaryNavy,
+            ),
+          ),
+          const SizedBox(height: 6),
+          if (_physicalPeers.isEmpty)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: AppColors.surfaceSubtle,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Text(
+                'Belum ada peer fisik terdeteksi. Aktifkan Siaran di satu HP dan Pindai di HP lainnya.',
+                style: TextStyle(fontSize: 11, color: AppColors.textMuted),
+                textAlign: TextAlign.center,
+              ),
+            )
+          else
+            ..._physicalPeers.map((peer) => _buildPhysicalPeerCard(peer)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPhysicalPeerCard(DiscoveredPeer peer) {
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceSubtle,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: peer.status == PeerConnectionStatus.connected
+              ? AppColors.successGreen.withValues(alpha: 0.5)
+              : AppColors.borderLight,
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: peer.status == PeerConnectionStatus.connected
+                  ? AppColors.successGreen.withValues(alpha: 0.15)
+                  : AppColors.accentBlue.withValues(alpha: 0.15),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              Icons.phone_android,
+              size: 20,
+              color: peer.status == PeerConnectionStatus.connected
+                  ? AppColors.successGreen
+                  : AppColors.accentBlue,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  peer.endpointName,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                    color: AppColors.primaryNavy,
+                  ),
+                ),
+                Text(
+                  'ID: #${peer.endpointId} • 1-Hop Direct',
+                  style: const TextStyle(
+                    fontSize: 10,
+                    color: AppColors.textMuted,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 6),
+          if (peer.status == PeerConnectionStatus.connected) ...[
+            InkWell(
+              onTap: () => _openChatWithPhysicalPeer(peer),
+              borderRadius: BorderRadius.circular(14),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                decoration: BoxDecoration(
+                  color: AppColors.primaryNavy,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: const Text(
+                  'Pesan 1-Hop',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 4),
+            InkWell(
+              onTap: () => _disconnectPhysicalPeer(peer),
+              child: const Padding(
+                padding: EdgeInsets.all(4),
+                child: Icon(
+                  Icons.close,
+                  size: 16,
+                  color: AppColors.emergencyRed,
+                ),
+              ),
+            ),
+          ] else if (peer.status == PeerConnectionStatus.connecting) ...[
+            const StatusBadge(
+              label: 'Menghubungkan',
+              backgroundColor: AppColors.warningOrangeLight,
+              textColor: AppColors.warningOrange,
+              fontSize: 9,
+              padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            ),
+          ] else ...[
+            InkWell(
+              onTap: () => _connectToPhysicalPeer(peer),
+              borderRadius: BorderRadius.circular(14),
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 5,
+                ),
+                decoration: BoxDecoration(
+                  color: AppColors.accentPillBg,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: AppColors.accentBlue.withValues(alpha: 0.4),
+                  ),
+                ),
+                child: const Text(
+                  'Hubungkan',
+                  style: TextStyle(
+                    color: AppColors.accentBlue,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
   }
 }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'core/constants/app_colors.dart';
 import 'core/constants/app_strings.dart';
 import 'core/theme/app_theme.dart';
+import 'core/transport/mesh_transport.dart';
 import 'features/chat/data/repositories/chat_repository.dart';
 import 'features/chat/presentation/chat_list_screen.dart';
 import 'features/home/presentation/home_screen.dart';
@@ -10,8 +11,9 @@ import 'features/mesh_devices/presentation/mesh_devices_screen.dart';
 /// Widget root aplikasi SiagaMesh.
 class SiagaMeshApp extends StatelessWidget {
   final ChatRepository? repository;
+  final MeshTransport? transport;
 
-  const SiagaMeshApp({super.key, this.repository});
+  const SiagaMeshApp({super.key, this.repository, this.transport});
 
   @override
   Widget build(BuildContext context) {
@@ -19,7 +21,10 @@ class SiagaMeshApp extends StatelessWidget {
       title: AppStrings.appName,
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
-      home: MainNavigationScaffold(repository: repository),
+      home: MainNavigationScaffold(
+        repository: repository,
+        transport: transport,
+      ),
     );
   }
 }
@@ -28,8 +33,9 @@ class SiagaMeshApp extends StatelessWidget {
 /// yang menggunakan gaya pill aktif sesuai referensi desain.jpg.
 class MainNavigationScaffold extends StatefulWidget {
   final ChatRepository? repository;
+  final MeshTransport? transport;
 
-  const MainNavigationScaffold({super.key, this.repository});
+  const MainNavigationScaffold({super.key, this.repository, this.transport});
 
   @override
   State<MainNavigationScaffold> createState() => _MainNavigationScaffoldState();
@@ -52,7 +58,10 @@ class _MainNavigationScaffoldState extends State<MainNavigationScaffold> {
         onNavigateToDevices: () => _onTabSelected(2),
       ),
       ChatListScreen(repository: widget.repository),
-      MeshDevicesScreen(repository: widget.repository),
+      MeshDevicesScreen(
+        repository: widget.repository,
+        transport: widget.transport,
+      ),
     ];
 
     return Scaffold(
