@@ -2,13 +2,16 @@ import 'package:flutter/material.dart';
 import 'core/constants/app_colors.dart';
 import 'core/constants/app_strings.dart';
 import 'core/theme/app_theme.dart';
+import 'features/chat/data/repositories/chat_repository.dart';
 import 'features/chat/presentation/chat_list_screen.dart';
 import 'features/home/presentation/home_screen.dart';
 import 'features/mesh_devices/presentation/mesh_devices_screen.dart';
 
 /// Widget root aplikasi SiagaMesh.
 class SiagaMeshApp extends StatelessWidget {
-  const SiagaMeshApp({super.key});
+  final ChatRepository? repository;
+
+  const SiagaMeshApp({super.key, this.repository});
 
   @override
   Widget build(BuildContext context) {
@@ -16,7 +19,7 @@ class SiagaMeshApp extends StatelessWidget {
       title: AppStrings.appName,
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
-      home: const MainNavigationScaffold(),
+      home: MainNavigationScaffold(repository: repository),
     );
   }
 }
@@ -24,7 +27,9 @@ class SiagaMeshApp extends StatelessWidget {
 /// Scaffold navigasi utama dengan 3 tab (Beranda, Pesan, Perangkat)
 /// yang menggunakan gaya pill aktif sesuai referensi desain.jpg.
 class MainNavigationScaffold extends StatefulWidget {
-  const MainNavigationScaffold({super.key});
+  final ChatRepository? repository;
+
+  const MainNavigationScaffold({super.key, this.repository});
 
   @override
   State<MainNavigationScaffold> createState() => _MainNavigationScaffoldState();
@@ -46,8 +51,8 @@ class _MainNavigationScaffoldState extends State<MainNavigationScaffold> {
         onNavigateToMessages: () => _onTabSelected(1),
         onNavigateToDevices: () => _onTabSelected(2),
       ),
-      const ChatListScreen(),
-      const MeshDevicesScreen(),
+      ChatListScreen(repository: widget.repository),
+      MeshDevicesScreen(repository: widget.repository),
     ];
 
     return Scaffold(

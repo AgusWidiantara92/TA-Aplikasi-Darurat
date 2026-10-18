@@ -2,13 +2,16 @@ import 'package:flutter/material.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/widgets/app_header.dart';
 import '../../../core/widgets/status_badge.dart';
+import '../data/repositories/chat_repository.dart';
 import '../models/chat_conversation.dart';
 import '../models/chat_message.dart';
 import 'chat_detail_screen.dart';
 
 /// Layar Daftar Pesan sesuai referensi Layar 3 pada desain.jpg.
 class ChatListScreen extends StatefulWidget {
-  const ChatListScreen({super.key});
+  final ChatRepository? repository;
+
+  const ChatListScreen({super.key, this.repository});
 
   @override
   State<ChatListScreen> createState() => _ChatListScreenState();
@@ -18,64 +21,32 @@ class _ChatListScreenState extends State<ChatListScreen> {
   int _selectedFilterIndex = 0;
   final TextEditingController _searchController = TextEditingController();
 
+  late ChatRepository _repository;
+  late List<ChatConversation> _conversations;
+
   final List<String> _filters = const [
     'Semua (4)',
     'Pesan Darurat (1)',
     'Node Terhubung',
   ];
 
-  final List<ChatConversation> _conversations = const [
-    ChatConversation(
-      id: 'conv-1',
-      title: 'Posko Medis Darurat',
-      nodeId: 'Node ID: #MED-0041',
-      lastMessage: 'Ambulans darurat sedang menuju titik koordinat...',
-      time: '10:33',
-      unreadCount: 1,
-      badgeText: 'DARURAT',
-      badgeBgColor: AppColors.emergencyRed,
-      badgeTextColor: Colors.white,
-      statusLabel: 'Darurat',
-      isEmergency: true,
-      isConnectedNode: true,
-    ),
-    ChatConversation(
-      id: 'conv-2',
-      title: 'Tim SAR Wilayah II',
-      nodeId: 'Node ID: #SAR-0012',
-      lastMessage: 'Konfirmasi: Rute evakuasi jembatan timur aman dilalui...',
-      time: '10:14',
-      badgeText: 'Terverifikasi',
-      badgeBgColor: AppColors.accentPillBg,
-      badgeTextColor: AppColors.accentBlue,
-      statusLabel: 'Dibaca',
-      isConnectedNode: true,
-    ),
-    ChatConversation(
-      id: 'conv-3',
-      title: 'Ahmed Fauzi',
-      nodeId: 'Jarak: 35 meter',
-      lastMessage: 'Kami memiliki cadangan air bersih di blok C...',
-      time: '09:48',
-      badgeText: 'Dekat Anda',
-      badgeBgColor: AppColors.surfaceSubtle,
-      badgeTextColor: AppColors.primaryNavy,
-      statusLabel: 'Terkirim',
-      isConnectedNode: true,
-    ),
-    ChatConversation(
-      id: 'conv-4',
-      title: 'Relawan Dapur Umum',
-      nodeId: 'Saluran Komunitas',
-      lastMessage: 'Distribusi logistik tahap pertama dimulai pukul 11:00...',
-      time: '08:15',
-      badgeText: 'Pengumuman',
-      badgeBgColor: AppColors.surfaceSubtle,
-      badgeTextColor: AppColors.textSecondary,
-      statusLabel: 'Selesai',
-      isConnectedNode: false,
-    ),
-  ];
+  @override
+  void initState() {
+    super.initState();
+    _repository = widget.repository ?? ChatRepositoryHolder.instance;
+    _conversations = List<ChatConversation>.from(
+      LocalChatRepository.defaultConversations,
+    );
+    _loadConversations();
+  }
+
+  Future<void> _loadConversations() async {
+    final loaded = await _repository.getConversations();
+    if (!mounted) return;
+    setState(() {
+      _conversations = loaded;
+    });
+  }
 
   List<ChatConversation> get _filteredConversations {
     final query = _searchController.text.toLowerCase();
@@ -99,18 +70,21 @@ class _ChatListScreenState extends State<ChatListScreen> {
   void _openChatDetail(
     ChatConversation conversation, {
     List<ChatMessage>? initialMessages,
-  }) {
-    Navigator.push(
+  }) async {
+    await Navigator.push(
       context,
       MaterialPageRoute(
         builder: (context) => ChatDetailScreen(
+          conversationId: conversation.id,
           conversationTitle: conversation.title,
           nodeId: conversation.nodeId,
           isEmergency: conversation.isEmergency,
           initialMessages: initialMessages,
+          repository: _repository,
         ),
       ),
     );
+    _loadConversations();
   }
 
   @override
@@ -422,20 +396,11 @@ class _ChatListScreenState extends State<ChatListScreen> {
                       padding: const EdgeInsets.symmetric(vertical: 14),
                       backgroundColor: AppColors.primaryNavy,
                     ),
-                    onPressed: () {
-                      _openChatDetail(
-                        const ChatConversation(
-                          id: 'new-conv',
-                          title: 'Siaran Darurat Lokal (Simulasi)',
-                          nodeId: 'Broadcast ID: #ALL-NODES',
-                          lastMessage: '',
-                          time: 'Sekarang',
-                          badgeText: 'SIARAN',
-                          badgeBgColor: AppColors.accentPillBg,
-                          badgeTextColor: AppColors.accentBlue,
-                        ),
-                        initialMessages: const [],
-                      );
+                    onPressed: () async {
+                      final broadcastConv = await _repository
+                          .getOrCreateBroadcastConversation();
+                      if (!mounted) return;
+                      _openChatDetail(broadcastConv);
                     },
                     child: const Text('Buat Pesan Baru'),
                   ),

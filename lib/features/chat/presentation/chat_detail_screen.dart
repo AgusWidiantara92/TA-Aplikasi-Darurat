@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/widgets/status_badge.dart';
+import '../data/repositories/chat_repository.dart';
 import '../models/chat_message.dart';
 
 /// Layar Detail Percakapan sesuai referensi Layar 2 pada desain.jpg.
@@ -8,14 +9,18 @@ class ChatDetailScreen extends StatefulWidget {
   final String conversationTitle;
   final String nodeId;
   final bool isEmergency;
+  final String? conversationId;
   final List<ChatMessage>? initialMessages;
+  final ChatRepository? repository;
 
   const ChatDetailScreen({
     super.key,
     required this.conversationTitle,
     required this.nodeId,
     this.isEmergency = false,
+    this.conversationId,
     this.initialMessages,
+    this.repository,
   });
 
   @override
@@ -26,60 +31,65 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
 
+  late ChatRepository _repository;
   late List<ChatMessage> _messages;
 
   @override
   void initState() {
     super.initState();
-    _messages = widget.initialMessages != null
-        ? List<ChatMessage>.from(widget.initialMessages!)
-        : [
-            const ChatMessage(
-              id: 'm1',
-              senderName: 'Posko SAR Unit 1',
-              text:
-                  'Halo! Kami mendeteksi sinyal SOS dari perangkat Anda di radius 350 meter. Apakah ada korban yang memerlukan pertolongan darurat?',
-              time: '10:30',
-              isMe: false,
-              relayInfo: 'Ditransmisi melalui multi-hop relay #01 (Simulasi)',
-            ),
-            const ChatMessage(
-              id: 'm2',
-              senderName: 'Anda',
-              text:
-                  'Benar, ada 2 orang lansia dan 1 balita membutuhkan evakuasi perahu karet karena air sudah mencapai 1.5 meter.',
-              time: '10:32',
-              isMe: true,
-              statusText: 'Terkirim • E2E Confirmed (Simulasi)',
-            ),
-            const ChatMessage(
-              id: 'm3',
-              senderName: 'Anda',
-              text: 'Data Telemetri Koordinat Lokasi Darurat',
-              time: '10:32',
-              isMe: true,
-              telemetryData: TelemetryData(
-                locationName: 'SDN 01 Pagi (Lantai 2)',
-                latitude: -6.2088,
-                longitude: 106.8456,
-                accuracy: 'Akurasi GPS Medis: ±5m (Simulasi)',
-                priority: 'PRIORITAS TINGGI',
-                validationInfo: 'Validasi Lewat: Berhasil (Simulasi)',
-              ),
-            ),
-            const ChatMessage(
-              id: 'm4',
-              senderName: 'Posko SAR Unit 1',
-              text:
-                  'Informasi diterima. Perahu evakuasi No. 04 sedang meluncur ke titik SDN 01. Harap tetap di titik tertinggi.',
-              time: '10:33',
-              isMe: false,
-              relayInfo: 'Terverifikasi Konsensus SAR Lapangan (Simulasi)',
-            ),
-          ];
+    _repository = widget.repository ?? ChatRepositoryHolder.instance;
+
+    if (widget.initialMessages != null) {
+      _messages = List<ChatMessage>.from(widget.initialMessages!);
+    } else if (widget.conversationId == 'conv-1' ||
+        (widget.conversationId == null &&
+            (widget.nodeId.contains('MED-0041') ||
+                widget.conversationTitle.contains('Posko Medis')))) {
+      _messages = List<ChatMessage>.from(
+        LocalChatRepository.defaultConv1Messages,
+      );
+      _loadMessagesFromRepo();
+    } else {
+      _messages = [];
+      _loadMessagesFromRepo();
+    }
   }
 
-  void _sendMessage({String? customText, TelemetryData? telemetry}) {
+  Future<void> _loadMessagesFromRepo() async {
+    final targetConvId = _resolveConversationId();
+    if (targetConvId == null) return;
+    final loaded = await _repository.getMessages(targetConvId);
+    if (!mounted) return;
+    setState(() {
+      if (_messages.isEmpty) {
+        _messages = loaded;
+      } else {
+        final existingIds = _messages.map((m) => m.id).toSet();
+        for (final m in loaded) {
+          if (!existingIds.contains(m.id)) {
+            _messages.add(m);
+          }
+        }
+      }
+    });
+  }
+
+  String? _resolveConversationId() {
+    if (widget.conversationId != null) {
+      return widget.conversationId;
+    }
+    if (widget.nodeId.contains('ALL-NODES') ||
+        widget.conversationTitle.contains('Siaran')) {
+      return 'broadcast-all';
+    }
+    if (widget.nodeId.contains('MED-0041') ||
+        widget.conversationTitle.contains('Posko Medis')) {
+      return 'conv-1';
+    }
+    return null;
+  }
+
+  void _sendMessage({String? customText, TelemetryData? telemetry}) async {
     final text = customText ?? _messageController.text.trim();
     if (text.isEmpty && telemetry == null) return;
 
@@ -87,22 +97,27 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     final timeStr =
         '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
 
+    final newMessage = ChatMessage(
+      id: 'user-${DateTime.now().millisecondsSinceEpoch}',
+      senderName: 'Anda',
+      text: text,
+      time: timeStr,
+      isMe: true,
+      statusText: 'Tersimpan Lokal (Simulasi)',
+      telemetryData: telemetry,
+    );
+
     setState(() {
-      _messages.add(
-        ChatMessage(
-          id: 'user-${DateTime.now().millisecondsSinceEpoch}',
-          senderName: 'Anda',
-          text: text,
-          time: timeStr,
-          isMe: true,
-          statusText: 'Tersimpan Lokal (Simulasi)',
-          telemetryData: telemetry,
-        ),
-      );
+      _messages.add(newMessage);
       if (customText == null) {
         _messageController.clear();
       }
     });
+
+    final targetConvId = _resolveConversationId();
+    if (targetConvId != null) {
+      await _repository.saveMessage(targetConvId, newMessage);
+    }
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {

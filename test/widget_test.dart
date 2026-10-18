@@ -1,8 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:siagamesh_app/app.dart';
+import 'package:siagamesh_app/features/chat/data/repositories/chat_repository.dart';
 
 void main() {
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+    ChatRepositoryHolder.setInstance(LocalChatRepository());
+  });
+
   testWidgets('SiagaMesh initial smoke test', (WidgetTester tester) async {
     await tester.pumpWidget(const SiagaMeshApp());
 
@@ -12,7 +19,9 @@ void main() {
     expect(find.text('INTERNET TIDAK DIBUTUHKAN'), findsOneWidget);
   });
 
-  testWidgets('Verifikasi akses navigasi seluruh 4 layar', (WidgetTester tester) async {
+  testWidgets('Verifikasi akses navigasi seluruh 4 layar', (
+    WidgetTester tester,
+  ) async {
     await tester.pumpWidget(const SiagaMeshApp());
 
     // 1. Layar Beranda (default)
@@ -42,10 +51,15 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Radar Sinyal Peer-to-Peer'), findsOneWidget);
-    expect(find.text('PENCARIAN AKTIF • 5 NODE TERDETEKSI (SIMULASI)'), findsOneWidget);
+    expect(
+      find.text('PENCARIAN AKTIF • 5 NODE TERDETEKSI (SIMULASI)'),
+      findsOneWidget,
+    );
   });
 
-  testWidgets('Verifikasi interaksi tombol SOS dan dialog konfirmasi', (WidgetTester tester) async {
+  testWidgets('Verifikasi interaksi tombol SOS dan dialog konfirmasi', (
+    WidgetTester tester,
+  ) async {
     await tester.pumpWidget(const SiagaMeshApp());
 
     // Tekan tombol SOS
@@ -61,10 +75,15 @@ void main() {
     await tester.pumpAndSettle();
 
     // Verifikasi SnackBar muncul
-    expect(find.text('Peringatan SOS tersimpan di memori lokal (Mode Demonstrasi).'), findsOneWidget);
+    expect(
+      find.text('Peringatan SOS tersimpan di memori lokal (Mode Demonstrasi).'),
+      findsOneWidget,
+    );
   });
 
-  testWidgets('Verifikasi filter dan pencarian di Daftar Pesan', (WidgetTester tester) async {
+  testWidgets('Verifikasi filter dan pencarian di Daftar Pesan', (
+    WidgetTester tester,
+  ) async {
     await tester.pumpWidget(const SiagaMeshApp());
 
     // Buka Tab Pesan
@@ -120,62 +139,76 @@ void main() {
     expect(find.text('Tidak ada percakapan ditemukan'), findsOneWidget);
   });
 
-  testWidgets('Verifikasi pengiriman pesan dan tombol respons cepat di Detail Percakapan', (WidgetTester tester) async {
-    await tester.pumpWidget(const SiagaMeshApp());
+  testWidgets(
+    'Verifikasi pengiriman pesan dan tombol respons cepat di Detail Percakapan',
+    (WidgetTester tester) async {
+      await tester.pumpWidget(const SiagaMeshApp());
 
-    // Buka Pesan -> Posko Medis Darurat
-    await tester.tap(find.text('Pesan'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Posko Medis Darurat'));
-    await tester.pumpAndSettle();
+      // Buka Pesan -> Posko Medis Darurat
+      await tester.tap(find.text('Pesan'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Posko Medis Darurat'));
+      await tester.pumpAndSettle();
 
-    // Ketik pesan simulasi manual
-    await tester.enterText(find.byType(TextField), 'Laporan: Posisi aman terkendali');
-    await tester.tap(find.text('Kirim'));
-    await tester.pumpAndSettle();
+      // Ketik pesan simulasi manual
+      await tester.enterText(
+        find.byType(TextField),
+        'Laporan: Posisi aman terkendali',
+      );
+      await tester.tap(find.text('Kirim'));
+      await tester.pumpAndSettle();
 
-    expect(find.text('Laporan: Posisi aman terkendali'), findsOneWidget);
+      expect(find.text('Laporan: Posisi aman terkendali'), findsOneWidget);
 
-    // Respons Cepat: Kondisi Aman
-    await tester.tap(find.text('Kondisi Aman'));
-    await tester.pumpAndSettle();
+      // Respons Cepat: Kondisi Aman
+      await tester.tap(find.text('Kondisi Aman'));
+      await tester.pumpAndSettle();
 
-    expect(find.text('Kondisi saat ini aman dan terkendali.'), findsOneWidget);
+      expect(
+        find.text('Kondisi saat ini aman dan terkendali.'),
+        findsOneWidget,
+      );
 
-    // Respons Cepat: Kirim Lokasi
-    await tester.tap(find.text('Kirim Lokasi'));
-    await tester.pumpAndSettle();
+      // Respons Cepat: Kirim Lokasi
+      await tester.tap(find.text('Kirim Lokasi'));
+      await tester.pumpAndSettle();
 
-    expect(find.textContaining('Titik Kumpul Evakuasi'), findsOneWidget);
-  });
+      expect(find.textContaining('Titik Kumpul Evakuasi'), findsOneWidget);
+    },
+  );
 
-  testWidgets('Verifikasi tombol Buat Pesan Baru membuka halaman siaran kosong', (WidgetTester tester) async {
-    await tester.pumpWidget(const SiagaMeshApp());
+  testWidgets(
+    'Verifikasi tombol Buat Pesan Baru membuka halaman siaran kosong',
+    (WidgetTester tester) async {
+      await tester.pumpWidget(const SiagaMeshApp());
 
-    await tester.tap(find.text('Pesan'));
-    await tester.pumpAndSettle();
+      await tester.tap(find.text('Pesan'));
+      await tester.pumpAndSettle();
 
-    // Drag list view ke atas untuk memunculkan tombol Buat Pesan Baru
-    await tester.drag(find.byType(ListView), const Offset(0, -350));
-    await tester.pumpAndSettle();
+      // Drag list view ke atas untuk memunculkan tombol Buat Pesan Baru
+      await tester.drag(find.byType(ListView), const Offset(0, -350));
+      await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Buat Pesan Baru'));
-    await tester.pumpAndSettle();
+      await tester.tap(find.text('Buat Pesan Baru'));
+      await tester.pumpAndSettle();
 
-    // Verifikasi berada di halaman siaran baru
-    expect(find.text('Siaran Darurat Lokal (Simulasi)'), findsOneWidget);
-    expect(find.text('Belum ada pesan siaran'), findsOneWidget);
+      // Verifikasi berada di halaman siaran baru
+      expect(find.text('Siaran Darurat Lokal (Simulasi)'), findsOneWidget);
+      expect(find.text('Belum ada pesan siaran'), findsOneWidget);
 
-    // Kirim pesan pertama
-    await tester.enterText(find.byType(TextField), 'Siaran darurat uji coba');
-    await tester.tap(find.text('Kirim'));
-    await tester.pumpAndSettle();
+      // Kirim pesan pertama
+      await tester.enterText(find.byType(TextField), 'Siaran darurat uji coba');
+      await tester.tap(find.text('Kirim'));
+      await tester.pumpAndSettle();
 
-    expect(find.text('Siaran darurat uji coba'), findsOneWidget);
-    expect(find.text('Belum ada pesan siaran'), findsNothing);
-  });
+      expect(find.text('Siaran darurat uji coba'), findsOneWidget);
+      expect(find.text('Belum ada pesan siaran'), findsNothing);
+    },
+  );
 
-  testWidgets('Verifikasi interaksi pada Layar Perangkat', (WidgetTester tester) async {
+  testWidgets('Verifikasi interaksi pada Layar Perangkat', (
+    WidgetTester tester,
+  ) async {
     await tester.pumpWidget(const SiagaMeshApp());
 
     await tester.tap(find.text('Perangkat'));
@@ -205,6 +238,9 @@ void main() {
     await tester.tap(find.text('Hubungkan'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Simulasi jabat tangan dengan Galaxy A54...'), findsOneWidget);
+    expect(
+      find.text('Simulasi jabat tangan dengan Galaxy A54...'),
+      findsOneWidget,
+    );
   });
 }

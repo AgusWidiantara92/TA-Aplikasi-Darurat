@@ -2,13 +2,16 @@ import 'package:flutter/material.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/widgets/app_header.dart';
 import '../../../core/widgets/status_badge.dart';
+import '../../chat/data/repositories/chat_repository.dart';
 import '../../chat/presentation/chat_detail_screen.dart';
 import '../models/mesh_node.dart';
 import 'widgets/radar_widget.dart';
 
 /// Layar Perangkat Terdekat & Radar sesuai referensi Layar 4 pada desain.jpg.
 class MeshDevicesScreen extends StatefulWidget {
-  const MeshDevicesScreen({super.key});
+  final ChatRepository? repository;
+
+  const MeshDevicesScreen({super.key, this.repository});
 
   @override
   State<MeshDevicesScreen> createState() => _MeshDevicesScreenState();
@@ -17,11 +20,13 @@ class MeshDevicesScreen extends StatefulWidget {
 class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
   bool _isScanning = false;
 
+  late ChatRepository _repository;
   late List<MeshNode> _nodes;
 
   @override
   void initState() {
     super.initState();
+    _repository = widget.repository ?? ChatRepositoryHolder.instance;
     _loadInitialNodes();
   }
 
@@ -92,14 +97,23 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
     });
   }
 
-  void _navigateToChat(MeshNode node) {
+  void _navigateToChat(MeshNode node) async {
+    final conv = await _repository.getOrCreateConversationForNode(
+      nodeId: node.id,
+      nodeName: node.name,
+      isEmergency: node.isEmergencyChannel,
+      isConnected: node.status == MeshNodeStatus.connected,
+    );
+    if (!mounted) return;
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (context) => ChatDetailScreen(
-          conversationTitle: node.name,
-          nodeId: 'Node: #${node.id.toUpperCase()}',
-          isEmergency: node.isEmergencyChannel,
+          conversationId: conv.id,
+          conversationTitle: conv.title,
+          nodeId: conv.nodeId,
+          isEmergency: conv.isEmergency,
+          repository: _repository,
         ),
       ),
     );
