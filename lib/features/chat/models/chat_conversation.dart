@@ -13,6 +13,7 @@ class ChatConversation {
   final Color badgeTextColor;
   final String? statusLabel;
   final bool isEmergency;
+  final bool isConnectedNode;
 
   const ChatConversation({
     required this.id,
@@ -26,5 +27,6 @@ class ChatConversation {
     required this.badgeTextColor,
     this.statusLabel,
     this.isEmergency = false,
+    this.isConnectedNode = true,
   });
 }

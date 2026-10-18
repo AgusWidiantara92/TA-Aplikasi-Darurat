@@ -51,17 +51,17 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
       MeshNode(
         id: 'node-3',
         name: 'Galaxy A54',
-        distanceText: 'Jarak: ~60 meter • Siap tersambung',
+        distanceText: 'Jarak: ~30 meter • Siap Tersambung',
         signalQuality: 'Cukup',
         status: MeshNodeStatus.available,
-        subInfo: 'Otorisasi Siap',
+        subInfo: 'Otentikasi Siap',
         radarAngle: 3.8,
         radarRadiusRatio: 0.78,
       ),
       MeshNode(
         id: 'node-4',
         name: 'Redmi Note 12',
-        distanceText: 'Jarak: ~92 meter',
+        distanceText: 'Jarak: ~50 meter',
         signalQuality: 'Lemah',
         status: MeshNodeStatus.connecting,
         subInfo: 'Proses negosiasi...',
@@ -108,9 +108,24 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
   @override
   Widget build(BuildContext context) {
     final blips = [
-      const RadarBlip(label: 'SAR-2', angle: 2.2, distanceFactor: 0.65, color: AppColors.accentBlue),
-      const RadarBlip(label: 'A01', angle: 0.8, distanceFactor: 0.45, color: AppColors.emergencyRed),
-      const RadarBlip(label: 'Warga', angle: 3.8, distanceFactor: 0.78, color: AppColors.successGreen),
+      const RadarBlip(
+        label: 'SAR-2',
+        angle: 2.2,
+        distanceFactor: 0.65,
+        color: AppColors.accentBlue,
+      ),
+      const RadarBlip(
+        label: 'A01',
+        angle: 0.8,
+        distanceFactor: 0.45,
+        color: AppColors.emergencyRed,
+      ),
+      const RadarBlip(
+        label: 'Warga',
+        angle: 3.8,
+        distanceFactor: 0.78,
+        color: AppColors.successGreen,
+      ),
     ];
 
     return Scaffold(
@@ -138,7 +153,7 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         const Text(
-                          'PEMINDAIAN AKTIF • 4 NODE TERDETEKSI (SIMULASI)',
+                          'PENCARIAN AKTIF • 5 NODE TERDETEKSI (SIMULASI)',
                           style: TextStyle(
                             color: AppColors.accentCyan,
                             fontSize: 10,
@@ -223,7 +238,10 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
                         backgroundColor: AppColors.surfaceSubtle,
                         textColor: AppColors.textSecondary,
                         fontSize: 9,
-                        padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        padding: EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 2,
+                        ),
                       ),
                     ],
                   ),
@@ -248,7 +266,9 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
                             width: 20,
                             child: CircularProgressIndicator(
                               strokeWidth: 2,
-                              valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                Colors.white,
+                              ),
                             ),
                           )
                         : const Text(
@@ -264,7 +284,7 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
 
                   const Center(
                     child: Text(
-                      'Pemindaian otomatis diperbarui setiap 10 detik (Simulasi Timer)',
+                      'Pembaruan otomatis berikutnya setiap 10 detik (Simulasi)',
                       style: TextStyle(
                         fontSize: 11,
                         color: AppColors.textMuted,
@@ -369,8 +389,12 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
                       node.subInfo,
                       style: TextStyle(
                         fontSize: 11,
-                        color: node.isEmergencyChannel ? AppColors.emergencyRed : AppColors.textMuted,
-                        fontWeight: node.isEmergencyChannel ? FontWeight.w600 : FontWeight.normal,
+                        color: node.isEmergencyChannel
+                            ? AppColors.emergencyRed
+                            : AppColors.textMuted,
+                        fontWeight: node.isEmergencyChannel
+                            ? FontWeight.w600
+                            : FontWeight.normal,
                       ),
                     ),
                   ],
@@ -458,7 +482,9 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
           decoration: BoxDecoration(
             color: AppColors.accentPillBg,
             borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: AppColors.accentBlue.withValues(alpha: 0.4)),
+            border: Border.all(
+              color: AppColors.accentBlue.withValues(alpha: 0.4),
+            ),
           ),
           child: const Text(
             'Hubungkan',

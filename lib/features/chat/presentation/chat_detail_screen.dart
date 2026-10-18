@@ -8,12 +8,14 @@ class ChatDetailScreen extends StatefulWidget {
   final String conversationTitle;
   final String nodeId;
   final bool isEmergency;
+  final List<ChatMessage>? initialMessages;
 
   const ChatDetailScreen({
     super.key,
     required this.conversationTitle,
     required this.nodeId,
     this.isEmergency = false,
+    this.initialMessages,
   });
 
   @override
@@ -29,50 +31,52 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   @override
   void initState() {
     super.initState();
-    _messages = [
-      const ChatMessage(
-        id: 'm1',
-        senderName: 'Posko SAR Unit 1',
-        text:
-            'Halo! Kami mendeteksi sinyal SOS dari perangkat Anda di radius 350 meter. Apakah ada korban yang memerlukan pertolongan darurat?',
-        time: '10:11',
-        isMe: false,
-        relayInfo: 'Diteruskan melalui Node Daisy-401 (Simulasi)',
-      ),
-      const ChatMessage(
-        id: 'm2',
-        senderName: 'Anda',
-        text:
-            'Benar, ada 2 orang lansia dan 1 balita membutuhkan evakuasi perahu karet karena air sudah mencapai 1.5 meter.',
-        time: '10:12',
-        isMe: true,
-        statusText: 'Tersimpan Lokal (Simulasi) • E2E Mock',
-      ),
-      const ChatMessage(
-        id: 'm3',
-        senderName: 'Anda',
-        text: 'Data Telemetri Koordinat Lokasi Darurat',
-        time: '10:12',
-        isMe: true,
-        telemetryData: TelemetryData(
-          locationName: 'SDN 01 Pagi (Lantai 2)',
-          latitude: -6.2088,
-          longitude: 106.8456,
-          accuracy: '<4m (Simulasi)',
-          priority: 'PRIORITAS TINGGI',
-          validationInfo: 'Lewat 3 Berbagi (Simulasi)',
-        ),
-      ),
-      const ChatMessage(
-        id: 'm4',
-        senderName: 'Posko SAR Unit 1',
-        text:
-            'Informasi diterima. Perahu evakuasi No. 04 sedang meluncur ke titik SDN 01. Harap tetap di titik tertinggi.',
-        time: '10:13',
-        isMe: false,
-        relayInfo: 'Terkonfirmasi Konsensus SAR Lapangan (Simulasi)',
-      ),
-    ];
+    _messages = widget.initialMessages != null
+        ? List<ChatMessage>.from(widget.initialMessages!)
+        : [
+            const ChatMessage(
+              id: 'm1',
+              senderName: 'Posko SAR Unit 1',
+              text:
+                  'Halo! Kami mendeteksi sinyal SOS dari perangkat Anda di radius 350 meter. Apakah ada korban yang memerlukan pertolongan darurat?',
+              time: '10:30',
+              isMe: false,
+              relayInfo: 'Ditransmisi melalui multi-hop relay #01 (Simulasi)',
+            ),
+            const ChatMessage(
+              id: 'm2',
+              senderName: 'Anda',
+              text:
+                  'Benar, ada 2 orang lansia dan 1 balita membutuhkan evakuasi perahu karet karena air sudah mencapai 1.5 meter.',
+              time: '10:32',
+              isMe: true,
+              statusText: 'Terkirim • E2E Confirmed (Simulasi)',
+            ),
+            const ChatMessage(
+              id: 'm3',
+              senderName: 'Anda',
+              text: 'Data Telemetri Koordinat Lokasi Darurat',
+              time: '10:32',
+              isMe: true,
+              telemetryData: TelemetryData(
+                locationName: 'SDN 01 Pagi (Lantai 2)',
+                latitude: -6.2088,
+                longitude: 106.8456,
+                accuracy: 'Akurasi GPS Medis: ±5m (Simulasi)',
+                priority: 'PRIORITAS TINGGI',
+                validationInfo: 'Validasi Lewat: Berhasil (Simulasi)',
+              ),
+            ),
+            const ChatMessage(
+              id: 'm4',
+              senderName: 'Posko SAR Unit 1',
+              text:
+                  'Informasi diterima. Perahu evakuasi No. 04 sedang meluncur ke titik SDN 01. Harap tetap di titik tertinggi.',
+              time: '10:33',
+              isMe: false,
+              relayInfo: 'Terverifikasi Konsensus SAR Lapangan (Simulasi)',
+            ),
+          ];
   }
 
   void _sendMessage({String? customText, TelemetryData? telemetry}) {
@@ -103,7 +107,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
         _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent + 80,
+          _scrollController.position.maxScrollExtent,
           duration: const Duration(milliseconds: 300),
           curve: Curves.easeOut,
         );
@@ -137,15 +141,26 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
           ),
         ),
         actions: [
-          Container(
-            margin: const EdgeInsets.only(right: 16),
-            width: 34,
-            height: 34,
-            decoration: BoxDecoration(
-              color: AppColors.primaryNavy,
-              shape: BoxShape.circle,
+          InkWell(
+            onTap: () {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Profil Pengguna (Mode Demonstrasi)'),
+                  duration: Duration(seconds: 1),
+                ),
+              );
+            },
+            borderRadius: BorderRadius.circular(20),
+            child: Container(
+              margin: const EdgeInsets.only(right: 16),
+              width: 34,
+              height: 34,
+              decoration: const BoxDecoration(
+                color: AppColors.primaryNavy,
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.person, color: Colors.white, size: 18),
             ),
-            child: const Icon(Icons.person, color: Colors.white, size: 18),
           ),
         ],
       ),
@@ -158,18 +173,43 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               color: AppColors.accentPillBg,
               child: Row(
-                children: const [
-                  Icon(Icons.hub_outlined, size: 14, color: AppColors.accentBlue),
-                  SizedBox(width: 8),
+                children: [
+                  const Icon(
+                    Icons.hub_outlined,
+                    size: 16,
+                    color: AppColors.accentBlue,
+                  ),
+                  const SizedBox(width: 8),
                   Expanded(
-                    child: Text(
-                      'PROTOKOL SIAGAMESH: P2P Simulasi (Tanpa Internet) [AKTIF]',
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: AppColors.accentPillText,
-                        fontWeight: FontWeight.w600,
-                      ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: const [
+                        Text(
+                          'PROTOKOL JARINGAN SIAGAMESH',
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: AppColors.accentBlue,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 0.3,
+                          ),
+                        ),
+                        Text(
+                          'Koneksi Langsung P2P (Tanpa internet atau Pulsa)',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: AppColors.accentPillText,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
                     ),
+                  ),
+                  const StatusBadge(
+                    label: 'AKTIF (SIMULASI)',
+                    backgroundColor: AppColors.primaryNavy,
+                    textColor: Colors.white,
+                    fontSize: 9,
+                    padding: EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                   ),
                 ],
               ),
@@ -193,7 +233,11 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                       color: AppColors.surfaceSubtle,
                       borderRadius: BorderRadius.circular(10),
                     ),
-                    child: const Icon(Icons.emergency_outlined, color: AppColors.emergencyRed, size: 24),
+                    child: const Icon(
+                      Icons.emergency_outlined,
+                      color: AppColors.emergencyRed,
+                      size: 24,
+                    ),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
@@ -220,7 +264,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                                 backgroundColor: AppColors.emergencyRed,
                                 textColor: Colors.white,
                                 fontSize: 9,
-                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 6,
+                                  vertical: 2,
+                                ),
                               ),
                           ],
                         ),
@@ -256,15 +303,60 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
 
             // Area Pesan
             Expanded(
-              child: ListView.builder(
-                controller: _scrollController,
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                itemCount: _messages.length,
-                itemBuilder: (context, index) {
-                  final msg = _messages[index];
-                  return _buildMessageItem(msg);
-                },
-              ),
+              child: _messages.isEmpty
+                  ? Center(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 32),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(12),
+                              decoration: const BoxDecoration(
+                                color: AppColors.surfaceSubtle,
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(
+                                Icons.chat_bubble_outline_rounded,
+                                size: 32,
+                                color: AppColors.textMuted,
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            const Text(
+                              'Belum ada pesan siaran',
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.bold,
+                                color: AppColors.primaryNavy,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            const Text(
+                              'Ketik pesan atau gunakan respons cepat di bawah untuk memulai transmisi siaran darurat lokal.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: AppColors.textSecondary,
+                                height: 1.4,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    )
+                  : ListView.builder(
+                      controller: _scrollController,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
+                      itemCount: _messages.length,
+                      itemBuilder: (context, index) {
+                        final msg = _messages[index];
+                        return _buildMessageItem(msg);
+                      },
+                    ),
             ),
 
             // Quick Response Chips
@@ -296,14 +388,18 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                     _buildQuickActionChip(
                       label: 'Kondisi Aman',
                       icon: Icons.verified_user_outlined,
-                      onTap: () => _sendMessage(customText: 'Kondisi saat ini aman dan terkendali.'),
+                      onTap: () => _sendMessage(
+                        customText: 'Kondisi saat ini aman dan terkendali.',
+                      ),
                     ),
                     const SizedBox(width: 8),
                     _buildQuickActionChip(
                       label: 'Butuh Bantuan Medis',
                       icon: Icons.medical_services_outlined,
                       isAlert: true,
-                      onTap: () => _sendMessage(customText: 'Membutuhkan bantuan medis darurat segera!'),
+                      onTap: () => _sendMessage(
+                        customText: 'Membutuhkan bantuan medis darurat segera!',
+                      ),
                     ),
                   ],
                 ),
@@ -315,9 +411,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               decoration: const BoxDecoration(
                 color: AppColors.surface,
-                border: Border(
-                  top: BorderSide(color: AppColors.borderLight),
-                ),
+                border: Border(top: BorderSide(color: AppColors.borderLight)),
               ),
               child: Row(
                 children: [
@@ -326,7 +420,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                       controller: _messageController,
                       decoration: const InputDecoration(
                         hintText: 'Ketik pesan (simulasi)...',
-                        contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                        contentPadding: EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 10,
+                        ),
                       ),
                       onSubmitted: (_) => _sendMessage(),
                     ),
@@ -336,7 +433,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                     onTap: () => _sendMessage(),
                     borderRadius: BorderRadius.circular(24),
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 12,
+                      ),
                       decoration: BoxDecoration(
                         color: AppColors.primaryNavy,
                         borderRadius: BorderRadius.circular(24),
@@ -372,10 +472,14 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
-          color: isAlert ? AppColors.emergencyRedLight : AppColors.surfaceSubtle,
+          color: isAlert
+              ? AppColors.emergencyRedLight
+              : AppColors.surfaceSubtle,
           borderRadius: BorderRadius.circular(16),
           border: Border.all(
-            color: isAlert ? AppColors.emergencyRed.withValues(alpha: 0.3) : AppColors.borderLight,
+            color: isAlert
+                ? AppColors.emergencyRed.withValues(alpha: 0.3)
+                : AppColors.borderLight,
           ),
         ),
         child: Row(
@@ -410,7 +514,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: Column(
-        crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+        crossAxisAlignment: isMe
+            ? CrossAxisAlignment.end
+            : CrossAxisAlignment.start,
         children: [
           // Header Pengirim & Waktu
           Padding(
@@ -498,7 +604,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             decoration: BoxDecoration(
               color: AppColors.surface,
               borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: AppColors.emergencyRed.withValues(alpha: 0.4)),
+              border: Border.all(
+                color: AppColors.emergencyRed.withValues(alpha: 0.4),
+              ),
               boxShadow: [
                 BoxShadow(
                   color: AppColors.emergencyRed.withValues(alpha: 0.05),
@@ -526,13 +634,16 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                       backgroundColor: AppColors.emergencyRedLight,
                       textColor: AppColors.emergencyRed,
                       fontSize: 9,
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 2,
+                      ),
                     ),
                   ],
                 ),
                 const SizedBox(height: 4),
-                Text(
-                  'TERKONFIRMASI GPS INDEPENDEN (SIMULASI)',
+                const Text(
+                  'TERHUBUNG DENGAN JARINGAN (SIMULASI)',
                   style: TextStyle(
                     fontSize: 9,
                     fontWeight: FontWeight.w600,
@@ -562,7 +673,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                       ),
                     ),
                     Text(
-                      'Akurasi: ${tele.accuracy}',
+                      tele.accuracy,
                       style: const TextStyle(
                         fontSize: 10,
                         color: AppColors.textMuted,
@@ -576,7 +687,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                   children: [
                     const Text(
                       'Pengirim: Node Anda',
-                      style: TextStyle(fontSize: 10, color: AppColors.textMuted),
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: AppColors.textMuted,
+                      ),
                     ),
                     Text(
                       tele.validationInfo,

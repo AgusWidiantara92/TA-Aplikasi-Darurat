@@ -7,10 +7,7 @@ import 'status_badge.dart';
 class AppHeader extends StatelessWidget {
   final VoidCallback? onProfileTap;
 
-  const AppHeader({
-    super.key,
-    this.onProfileTap,
-  });
+  const AppHeader({super.key, this.onProfileTap});
 
   @override
   Widget build(BuildContext context) {
@@ -41,7 +38,8 @@ class AppHeader extends StatelessWidget {
             ],
           ),
           InkWell(
-            onTap: onProfileTap ??
+            onTap:
+                onProfileTap ??
                 () {
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(
@@ -59,11 +57,7 @@ class AppHeader extends StatelessWidget {
                 shape: BoxShape.circle,
                 border: Border.all(color: AppColors.borderLight, width: 1.5),
               ),
-              child: const Icon(
-                Icons.person,
-                color: Colors.white,
-                size: 20,
-              ),
+              child: const Icon(Icons.person, color: Colors.white, size: 20),
             ),
           ),
         ],

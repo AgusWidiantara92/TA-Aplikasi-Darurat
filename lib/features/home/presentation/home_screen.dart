@@ -21,7 +21,11 @@ class HomeScreen extends StatelessWidget {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: Row(
           children: const [
-            Icon(Icons.warning_amber_rounded, color: AppColors.emergencyRed, size: 28),
+            Icon(
+              Icons.warning_amber_rounded,
+              color: AppColors.emergencyRed,
+              size: 28,
+            ),
             SizedBox(width: 8),
             Text(
               'Simulasi SOS',
@@ -93,7 +97,10 @@ class HomeScreen extends StatelessWidget {
               Container(
                 width: double.infinity,
                 margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
                 decoration: BoxDecoration(
                   color: AppColors.accentPillBg,
                   borderRadius: BorderRadius.circular(12),
@@ -101,7 +108,11 @@ class HomeScreen extends StatelessWidget {
                 ),
                 child: Row(
                   children: const [
-                    Icon(Icons.info_outline, size: 16, color: AppColors.accentBlue),
+                    Icon(
+                      Icons.info_outline,
+                      size: 16,
+                      color: AppColors.accentBlue,
+                    ),
                     SizedBox(width: 8),
                     Expanded(
                       child: Text(
@@ -127,7 +138,7 @@ class HomeScreen extends StatelessWidget {
                   runSpacing: 6,
                   children: [
                     StatusBadge(
-                      label: 'STATUS SIAGA AKTIF (DEMO)',
+                      label: 'STATUS SIAGA DARURAT (DEMO)',
                       backgroundColor: AppColors.accentCyanLight,
                       textColor: AppColors.accentBlue,
                       icon: Icons.wifi_tethering,
@@ -181,7 +192,10 @@ class HomeScreen extends StatelessWidget {
                   borderRadius: BorderRadius.circular(24),
                   child: Ink(
                     width: double.infinity,
-                    padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 16),
+                    padding: const EdgeInsets.symmetric(
+                      vertical: 18,
+                      horizontal: 16,
+                    ),
                     decoration: BoxDecoration(
                       color: AppColors.primaryNavy,
                       borderRadius: BorderRadius.circular(24),
@@ -198,7 +212,11 @@ class HomeScreen extends StatelessWidget {
                         Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: const [
-                            Icon(Icons.emergency_share, color: Colors.white, size: 20),
+                            Icon(
+                              Icons.emergency_share,
+                              color: Colors.white,
+                              size: 20,
+                            ),
                             SizedBox(width: 8),
                             Text(
                               'KIRIM PESAN DARURAT (SOS)',
@@ -213,7 +231,7 @@ class HomeScreen extends StatelessWidget {
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          'Prioritas transmisi khusus mode dalam jangkauan (Simulasi)',
+                          'Prioritas transmisi ke seluruh node dalam jangkauan (Simulasi)',
                           style: TextStyle(
                             color: Colors.white.withValues(alpha: 0.75),
                             fontSize: 11,
@@ -230,84 +248,100 @@ class HomeScreen extends StatelessWidget {
               // Kartu 1: Konektivitas Mesh (Simulasi)
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: AppColors.surface,
-                    borderRadius: BorderRadius.circular(18),
-                    border: Border.all(color: AppColors.borderLight),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: const [
-                              Text(
-                                'KONEKTIVITAS MESH',
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w600,
-                                  color: AppColors.textMuted,
-                                  letterSpacing: 0.5,
+                child: InkWell(
+                  onTap: onNavigateToMessages,
+                  borderRadius: BorderRadius.circular(18),
+                  child: Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: AppColors.surface,
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(color: AppColors.borderLight),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: const [
+                                Text(
+                                  'KONEKTIVITAS MESH',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w600,
+                                    color: AppColors.textMuted,
+                                    letterSpacing: 0.5,
+                                  ),
                                 ),
-                              ),
-                              SizedBox(height: 2),
-                              Text(
-                                'Jaringan Lokal Aktif (Simulasi)',
-                                style: TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.bold,
-                                  color: AppColors.primaryNavy,
+                                SizedBox(height: 2),
+                                Text(
+                                  'Jaringan Lokal Aktif',
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold,
+                                    color: AppColors.primaryNavy,
+                                  ),
                                 ),
-                              ),
-                            ],
-                          ),
-                          StatusBadge(
-                            label: 'Mode P2P Demo',
-                            backgroundColor: AppColors.accentPillBg,
-                            textColor: AppColors.accentBlue,
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 14),
-                      Row(
-                        children: [
-                          StatusBadge(
-                            label: '4 Perangkat Terhubung (Simulasi)',
-                            backgroundColor: AppColors.surfaceSubtle,
-                            textColor: AppColors.primaryNavy,
-                            icon: Icons.devices,
-                            fontSize: 11,
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: StatusBadge(
-                              label: 'OFFLINE MODE',
-                              backgroundColor: AppColors.successGreenLight,
-                              textColor: AppColors.successGreen,
-                              icon: Icons.check_circle_outline,
-                              fontSize: 10,
+                              ],
                             ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 16),
-                      const Divider(height: 1),
-                      const SizedBox(height: 14),
-                      // Parameter Teknis (Mock)
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          _buildMetricColumn('Kekuatan Sinyal', 'Optimal (0.8s)', AppColors.successGreen),
-                          _buildMetricColumn('Enkripsi', 'AES-256 (Mock)', AppColors.primaryNavy),
-                          _buildMetricColumn('Baterai Node', '94% Siap', AppColors.primaryNavy),
-                        ],
-                      ),
-                    ],
+                            StatusBadge(
+                              label: 'Mode P2P Demo',
+                              backgroundColor: AppColors.accentPillBg,
+                              textColor: AppColors.accentBlue,
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 14),
+                        Row(
+                          children: [
+                            StatusBadge(
+                              label: '4 Perangkat Sekitar',
+                              backgroundColor: AppColors.surfaceSubtle,
+                              textColor: AppColors.primaryNavy,
+                              icon: Icons.devices,
+                              fontSize: 11,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: StatusBadge(
+                                label: 'INTERNET TIDAK DIBUTUHKAN',
+                                backgroundColor: AppColors.successGreenLight,
+                                textColor: AppColors.successGreen,
+                                icon: Icons.check_circle_outline,
+                                fontSize: 10,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 16),
+                        const Divider(height: 1),
+                        const SizedBox(height: 14),
+                        // Parameter Teknis (Mock)
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            _buildMetricColumn(
+                              'Kekuatan Hop',
+                              'Optimal (0.8 detik)',
+                              AppColors.successGreen,
+                            ),
+                            _buildMetricColumn(
+                              'Enkripsi',
+                              'AES-256 GCM (Mock)',
+                              AppColors.primaryNavy,
+                            ),
+                            _buildMetricColumn(
+                              'Baterai Node',
+                              '94% Siap',
+                              AppColors.primaryNavy,
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -340,7 +374,9 @@ class HomeScreen extends StatelessWidget {
                           ),
                           StatusBadge(
                             label: '8 Terdeteksi (Simulasi)',
-                            backgroundColor: Colors.white.withValues(alpha: 0.15),
+                            backgroundColor: Colors.white.withValues(
+                              alpha: 0.15,
+                            ),
                             textColor: Colors.white,
                             fontSize: 10,
                           ),
@@ -366,7 +402,10 @@ class HomeScreen extends StatelessWidget {
                       ),
                       const SizedBox(height: 14),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 8,
+                        ),
                         decoration: BoxDecoration(
                           color: Colors.white.withValues(alpha: 0.08),
                           borderRadius: BorderRadius.circular(10),
@@ -374,12 +413,25 @@ class HomeScreen extends StatelessWidget {
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            Text(
-                              'Cakupan Radius: ~2.5km (Simulasi)',
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: Colors.white.withValues(alpha: 0.9),
-                              ),
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Cakupan Radius Wilayah',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    color: AppColors.accentCyan,
+                                  ),
+                                ),
+                                Text(
+                                  '2.1km Persegi (Simulasi)',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.white.withValues(alpha: 0.9),
+                                  ),
+                                ),
+                              ],
                             ),
                             TextButton(
                               style: TextButton.styleFrom(
@@ -417,10 +469,7 @@ class HomeScreen extends StatelessWidget {
       children: [
         Text(
           label,
-          style: const TextStyle(
-            fontSize: 11,
-            color: AppColors.textSecondary,
-          ),
+          style: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
         ),
         const SizedBox(height: 3),
         Text(

@@ -21,10 +21,7 @@ class RadarBlip {
 class RadarWidget extends StatelessWidget {
   final List<RadarBlip> blips;
 
-  const RadarWidget({
-    super.key,
-    required this.blips,
-  });
+  const RadarWidget({super.key, required this.blips});
 
   @override
   Widget build(BuildContext context) {
@@ -72,11 +69,8 @@ class RadarWidget extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: const [
               Text(
-                'Protokol Mesh: Simulasi Berizin',
-                style: TextStyle(
-                  fontSize: 11,
-                  color: AppColors.textSecondary,
-                ),
+                'Protokol Mesh: SiagaLink (Simulasi)',
+                style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
               ),
               Text(
                 'Latensi: <42ms (Mock)',
@@ -176,10 +170,7 @@ class _RadarPainter extends CustomPainter {
         ),
       );
       textPainter.layout();
-      textPainter.paint(
-        canvas,
-        Offset(x - (textPainter.width / 2), y + 10),
-      );
+      textPainter.paint(canvas, Offset(x - (textPainter.width / 2), y + 10));
     }
   }
 

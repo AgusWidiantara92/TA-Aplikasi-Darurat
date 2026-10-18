@@ -51,10 +51,7 @@ class _MainNavigationScaffoldState extends State<MainNavigationScaffold> {
     ];
 
     return Scaffold(
-      body: IndexedStack(
-        index: _currentIndex,
-        children: screens,
-      ),
+      body: IndexedStack(index: _currentIndex, children: screens),
       bottomNavigationBar: Container(
         decoration: const BoxDecoration(
           color: Colors.white,
@@ -68,21 +65,9 @@ class _MainNavigationScaffoldState extends State<MainNavigationScaffold> {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceAround,
             children: [
-              _buildNavItem(
-                index: 0,
-                label: 'Beranda',
-                icon: Icons.home_filled,
-              ),
-              _buildNavItem(
-                index: 1,
-                label: 'Pesan',
-                icon: Icons.chat_bubble_outline_rounded,
-              ),
-              _buildNavItem(
-                index: 2,
-                label: 'Perangkat',
-                icon: Icons.radar_rounded,
-              ),
+              _buildNavItem(index: 0, label: 'Beranda'),
+              _buildNavItem(index: 1, label: 'Pesan'),
+              _buildNavItem(index: 2, label: 'Perangkat'),
             ],
           ),
         ),
@@ -90,11 +75,7 @@ class _MainNavigationScaffoldState extends State<MainNavigationScaffold> {
     );
   }
 
-  Widget _buildNavItem({
-    required int index,
-    required String label,
-    required IconData icon,
-  }) {
+  Widget _buildNavItem({required int index, required String label}) {
     final isActive = _currentIndex == index;
 
     return InkWell(
@@ -103,30 +84,19 @@ class _MainNavigationScaffoldState extends State<MainNavigationScaffold> {
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
         padding: isActive
-            ? const EdgeInsets.symmetric(horizontal: 18, vertical: 8)
-            : const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            ? const EdgeInsets.symmetric(horizontal: 24, vertical: 8)
+            : const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         decoration: BoxDecoration(
           color: isActive ? AppColors.primaryNavy : Colors.transparent,
           borderRadius: BorderRadius.circular(24),
         ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              icon,
-              size: 18,
-              color: isActive ? Colors.white : AppColors.textSecondary,
-            ),
-            const SizedBox(width: 6),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: isActive ? FontWeight.bold : FontWeight.w500,
-                color: isActive ? Colors.white : AppColors.textSecondary,
-              ),
-            ),
-          ],
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: isActive ? FontWeight.bold : FontWeight.w500,
+            color: isActive ? Colors.white : AppColors.textSecondary,
+          ),
         ),
       ),
     );

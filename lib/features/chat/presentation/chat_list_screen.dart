@@ -3,6 +3,7 @@ import '../../../core/constants/app_colors.dart';
 import '../../../core/widgets/app_header.dart';
 import '../../../core/widgets/status_badge.dart';
 import '../models/chat_conversation.dart';
+import '../models/chat_message.dart';
 import 'chat_detail_screen.dart';
 
 /// Layar Daftar Pesan sesuai referensi Layar 3 pada desain.jpg.
@@ -29,52 +30,58 @@ class _ChatListScreenState extends State<ChatListScreen> {
       title: 'Posko Medis Darurat',
       nodeId: 'Node ID: #MED-0041',
       lastMessage: 'Ambulans darurat sedang menuju titik koordinat...',
-      time: 'Baru saja',
+      time: '10:33',
       unreadCount: 1,
       badgeText: 'DARURAT',
       badgeBgColor: AppColors.emergencyRed,
       badgeTextColor: Colors.white,
+      statusLabel: 'Darurat',
       isEmergency: true,
+      isConnectedNode: true,
     ),
     ChatConversation(
       id: 'conv-2',
       title: 'Tim SAR Wilayah II',
-      nodeId: 'Node ID: #SAR-0216',
+      nodeId: 'Node ID: #SAR-0012',
       lastMessage: 'Konfirmasi: Rute evakuasi jembatan timur aman dilalui...',
       time: '10:14',
       badgeText: 'Terverifikasi',
       badgeBgColor: AppColors.accentPillBg,
       badgeTextColor: AppColors.accentBlue,
       statusLabel: 'Dibaca',
+      isConnectedNode: true,
     ),
     ChatConversation(
       id: 'conv-3',
-      title: 'Ahmad Fauzi',
-      nodeId: 'Jarak: ~3 Node',
+      title: 'Ahmed Fauzi',
+      nodeId: 'Jarak: 35 meter',
       lastMessage: 'Kami memiliki cadangan air bersih di blok C...',
       time: '09:48',
       badgeText: 'Dekat Anda',
       badgeBgColor: AppColors.surfaceSubtle,
       badgeTextColor: AppColors.primaryNavy,
       statusLabel: 'Terkirim',
+      isConnectedNode: true,
     ),
     ChatConversation(
       id: 'conv-4',
       title: 'Relawan Dapur Umum',
-      nodeId: 'Sistem Komunitas',
+      nodeId: 'Saluran Komunitas',
       lastMessage: 'Distribusi logistik tahap pertama dimulai pukul 11:00...',
-      time: '08:30',
+      time: '08:15',
       badgeText: 'Pengumuman',
       badgeBgColor: AppColors.surfaceSubtle,
       badgeTextColor: AppColors.textSecondary,
       statusLabel: 'Selesai',
+      isConnectedNode: false,
     ),
   ];
 
   List<ChatConversation> get _filteredConversations {
     final query = _searchController.text.toLowerCase();
     return _conversations.where((conv) {
-      final matchesQuery = conv.title.toLowerCase().contains(query) ||
+      final matchesQuery =
+          conv.title.toLowerCase().contains(query) ||
           conv.lastMessage.toLowerCase().contains(query) ||
           conv.nodeId.toLowerCase().contains(query);
 
@@ -83,13 +90,16 @@ class _ChatListScreenState extends State<ChatListScreen> {
       if (_selectedFilterIndex == 1) {
         return conv.isEmergency;
       } else if (_selectedFilterIndex == 2) {
-        return !conv.isEmergency;
+        return conv.isConnectedNode;
       }
       return true;
     }).toList();
   }
 
-  void _openChatDetail(ChatConversation conversation) {
+  void _openChatDetail(
+    ChatConversation conversation, {
+    List<ChatMessage>? initialMessages,
+  }) {
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -97,6 +107,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
           conversationTitle: conversation.title,
           nodeId: conversation.nodeId,
           isEmergency: conversation.isEmergency,
+          initialMessages: initialMessages,
         ),
       ),
     );
@@ -134,25 +145,12 @@ class _ChatListScreenState extends State<ChatListScreen> {
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Container(
-                          padding: const EdgeInsets.all(8),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withValues(alpha: 0.12),
-                            shape: BoxShape.circle,
-                          ),
-                          child: const Icon(
-                            Icons.cell_tower,
-                            color: AppColors.accentCyan,
-                            size: 20,
-                          ),
-                        ),
-                        const SizedBox(width: 12),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               const Text(
-                                'PROTOKOL SIAGAMESH AKTIF (SIMULASI)',
+                                '• PROTOKOL SIAGAMESH AKTIF',
                                 style: TextStyle(
                                   color: AppColors.accentCyan,
                                   fontSize: 10,
@@ -171,7 +169,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
                               ),
                               const SizedBox(height: 3),
                               Text(
-                                'Komunikasi offline fisik belum diimplementasikan. Seluruh data percakapan adalah data simulasi.',
+                                'Pesan terkirim langsung antar ponsel tanpa internet (Simulasi UI). Komunikasi radio fisik belum diimplementasikan.',
                                 style: TextStyle(
                                   color: Colors.white.withValues(alpha: 0.75),
                                   fontSize: 11,
@@ -179,6 +177,19 @@ class _ChatListScreenState extends State<ChatListScreen> {
                                 ),
                               ),
                             ],
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: 0.12),
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(
+                            Icons.cell_tower,
+                            color: AppColors.accentCyan,
+                            size: 20,
                           ),
                         ),
                       ],
@@ -193,7 +204,11 @@ class _ChatListScreenState extends State<ChatListScreen> {
                     onChanged: (_) => setState(() {}),
                     decoration: InputDecoration(
                       hintText: 'Cari percakapan atau ID perangkat...',
-                      prefixIcon: const Icon(Icons.search, size: 20, color: AppColors.textMuted),
+                      prefixIcon: const Icon(
+                        Icons.search,
+                        size: 20,
+                        color: AppColors.textMuted,
+                      ),
                       suffixIcon: _searchController.text.isNotEmpty
                           ? IconButton(
                               icon: const Icon(Icons.clear, size: 18),
@@ -221,8 +236,12 @@ class _ChatListScreenState extends State<ChatListScreen> {
                               _filters[index],
                               style: TextStyle(
                                 fontSize: 12,
-                                fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
-                                color: isSelected ? Colors.white : AppColors.textSecondary,
+                                fontWeight: isSelected
+                                    ? FontWeight.bold
+                                    : FontWeight.w500,
+                                color: isSelected
+                                    ? Colors.white
+                                    : AppColors.textSecondary,
                               ),
                             ),
                             selected: isSelected,
@@ -231,7 +250,9 @@ class _ChatListScreenState extends State<ChatListScreen> {
                             shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(20),
                               side: BorderSide(
-                                color: isSelected ? AppColors.primaryNavy : AppColors.borderLight,
+                                color: isSelected
+                                    ? AppColors.primaryNavy
+                                    : AppColors.borderLight,
                               ),
                             ),
                             showCheckmark: false,
@@ -291,7 +312,10 @@ class _ChatListScreenState extends State<ChatListScreen> {
                                           backgroundColor: conv.badgeBgColor,
                                           textColor: conv.badgeTextColor,
                                           fontSize: 10,
-                                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 6,
+                                            vertical: 2,
+                                          ),
                                         ),
                                       ],
                                     ),
@@ -300,8 +324,12 @@ class _ChatListScreenState extends State<ChatListScreen> {
                                     conv.time,
                                     style: TextStyle(
                                       fontSize: 11,
-                                      color: conv.isEmergency ? AppColors.emergencyRed : AppColors.textMuted,
-                                      fontWeight: conv.isEmergency ? FontWeight.bold : FontWeight.normal,
+                                      color: conv.isEmergency
+                                          ? AppColors.emergencyRed
+                                          : AppColors.textMuted,
+                                      fontWeight: conv.isEmergency
+                                          ? FontWeight.bold
+                                          : FontWeight.normal,
                                     ),
                                   ),
                                 ],
@@ -319,7 +347,8 @@ class _ChatListScreenState extends State<ChatListScreen> {
                               ),
                               const SizedBox(height: 10),
                               Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
                                 children: [
                                   Text(
                                     conv.nodeId,
@@ -361,28 +390,54 @@ class _ChatListScreenState extends State<ChatListScreen> {
                     );
                   }),
 
+                  if (_filteredConversations.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 36),
+                      child: Center(
+                        child: Column(
+                          children: [
+                            Icon(
+                              Icons.search_off,
+                              size: 36,
+                              color: AppColors.textMuted,
+                            ),
+                            SizedBox(height: 8),
+                            Text(
+                              'Tidak ada percakapan ditemukan',
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: AppColors.textSecondary,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+
                   const SizedBox(height: 12),
 
                   // Tombol Buat Pesan Baru
-                  ElevatedButton.icon(
+                  ElevatedButton(
                     style: ElevatedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 14),
                       backgroundColor: AppColors.primaryNavy,
                     ),
                     onPressed: () {
-                      _openChatDetail(const ChatConversation(
-                        id: 'new-conv',
-                        title: 'Siaran Darurat Lokal (Simulasi)',
-                        nodeId: 'Broadcast ID: #ALL-NODES',
-                        lastMessage: '',
-                        time: 'Sekarang',
-                        badgeText: 'SIARAN',
-                        badgeBgColor: AppColors.accentPillBg,
-                        badgeTextColor: AppColors.accentBlue,
-                      ));
+                      _openChatDetail(
+                        const ChatConversation(
+                          id: 'new-conv',
+                          title: 'Siaran Darurat Lokal (Simulasi)',
+                          nodeId: 'Broadcast ID: #ALL-NODES',
+                          lastMessage: '',
+                          time: 'Sekarang',
+                          badgeText: 'SIARAN',
+                          badgeBgColor: AppColors.accentPillBg,
+                          badgeTextColor: AppColors.accentBlue,
+                        ),
+                        initialMessages: const [],
+                      );
                     },
-                    icon: const Icon(Icons.edit_note, size: 20),
-                    label: const Text('Buat Pesan Baru'),
+                    child: const Text('Buat Pesan Baru'),
                   ),
 
                   const SizedBox(height: 20),

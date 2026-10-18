@@ -1,8 +1,4 @@
-enum MeshNodeStatus {
-  connected,
-  available,
-  connecting,
-}
+enum MeshNodeStatus { connected, available, connecting }
 
 /// Model data perangkat sekitar (mock node) untuk halaman Perangkat Terdekat & Radar.
 class MeshNode {
