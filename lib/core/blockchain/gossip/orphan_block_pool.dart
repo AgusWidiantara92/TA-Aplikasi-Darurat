@@ -59,8 +59,14 @@ class OrphanBlockEntry {
   final DateTime entryTime;
   final DateTime expiresAt;
   final String peerEndpointId;
+
+  /// ID node peer pengirim asal blok orphan (wajib untuk strict peer binding pada deferred ACK).
   final String? peerNodeId;
+
+  /// ID unik sesi gossip saat blok orphan diterima (wajib untuk strict session binding; wildcard dilarang).
   final String? sessionId;
+
+  /// ID permintaan batch asal blok orphan (wajib terdaftar dalam riwayat sesi untuk deferred ACK).
   final String? requestId;
 
   OrphanBlockEntry({

@@ -47,9 +47,23 @@ class PeerGossipSession {
   DagInvMessage? pendingInv;
 
   // Pelacakan permintaan blok aktif
-  String? activeRequestId;
+  String? _activeRequestId;
+  String? get activeRequestId => _activeRequestId;
+  set activeRequestId(String? value) {
+    _activeRequestId = value;
+    if (value != null) {
+      recordRecognizedRequestId(value);
+    }
+  }
+
   final Set<String> activeRequestedHashes = {};
   DateTime? activeRequestTime;
+
+  /// Riwayat requestId permintaan blok yang diinisiasi atau diproses dalam sesi ini (maksimum 50 entri FIFO).
+  ///
+  /// Menjamin bahwa ACK tertunda (deferred ACK) hanya dapat dikirim jika requestId cocok
+  /// dengan catatan permintaan sah dalam sesi ini (Stage 5E.4.5.2).
+  final Set<String> recognizedRequestIds = {};
 
   // Pelacakan requestId dari DAG_GET_BLOCKS yang dilayani ke peer ini
   final Set<String> servedRequestIds = {};
@@ -71,8 +85,19 @@ class PeerGossipSession {
     servedRequestIds.add(reqId);
   }
 
+  /// Mencatat requestId ke dalam riwayat permintaan yang diakui dalam sesi ini.
+  void recordRecognizedRequestId(String reqId) {
+    final trimmed = reqId.trim();
+    if (trimmed.isNotEmpty) {
+      if (recognizedRequestIds.length >= 50) {
+        recognizedRequestIds.remove(recognizedRequestIds.first);
+      }
+      recognizedRequestIds.add(trimmed);
+    }
+  }
+
   void clearActiveRequest() {
-    activeRequestId = null;
+    _activeRequestId = null;
     activeRequestedHashes.clear();
     activeRequestTime = null;
   }
@@ -456,6 +481,7 @@ class DagGossipSyncEngine {
     PeerGossipSession session,
     DagGetBlocksMessage msg,
   ) async {
+    session.remoteNodeId ??= msg.senderNodeId;
     session.addServedRequestId(msg.requestId);
     final availableBlocks = <SecurityBlock>[];
     final prunedHashes = <String>[];
@@ -607,6 +633,9 @@ class DagGossipSyncEngine {
       );
       return;
     }
+
+    session.remoteNodeId ??= batch.senderNodeId;
+    session.recordRecognizedRequestId(batch.requestId);
 
     // Ambil snapshot ledger sebelum mutasi apa pun untuk jaminan rollback jika persistensi gagal
     final preIngestSnapshot = ledger.exportPersistedState();
@@ -921,46 +950,88 @@ class DagGossipSyncEngine {
           peerSession.knownPeerBlockHashes.add(candidate.blockHash);
         }
 
-        // 5. Kirim DAG_SYNC_ACK jika orphan ini berasal dari request sebelumnya yang belum di-ACK (Stage 5E.4.5.1)
-        if (entry.requestId != null && entry.peerEndpointId.isNotEmpty) {
-          final targetPeerSession =
-              _sessions[entry.peerEndpointId] ??
-              (entry.peerEndpointId == currentEndpointId
-                  ? currentSession
-                  : null);
+        // 5. Kirim DAG_SYNC_ACK jika orphan ini berasal dari request sebelumnya yang belum di-ACK (Stage 5E.4.5.1 & 5E.4.5.2)
+        final reqId = entry.requestId?.trim();
+        final peerEndpointId = entry.peerEndpointId.trim();
 
-          // Validasi korelasi sesi dan request:
-          // Pastikan peer masih terhubung, sesi masih sama (bukan sesi baru setelah reconnect),
-          // dan remoteNodeId cocok jika diketahui.
+        if (reqId != null && reqId.isNotEmpty && peerEndpointId.isNotEmpty) {
+          final targetPeerSession =
+              _sessions[peerEndpointId] ??
+              (peerEndpointId == currentEndpointId ? currentSession : null);
+
+          // Pengecekan Keketatan Korelasi Sesi & Request (Stage 5E.4.5.2):
+          //
+          // 1. sessionId orphan TIDAK BOLEH null atau kosong (wildcard dilarang)
+          final hasValidSessionId =
+              entry.sessionId != null && entry.sessionId!.trim().isNotEmpty;
+
+          // 2. Sesi asal harus masih aktif dan sessionId harus cocok secara eksplisit
           final isSameSession =
               targetPeerSession != null &&
-              (entry.sessionId == null ||
-                  targetPeerSession.sessionId == entry.sessionId) &&
-              (entry.peerNodeId == null ||
-                  targetPeerSession.remoteNodeId == null ||
-                  targetPeerSession.remoteNodeId == entry.peerNodeId);
+              hasValidSessionId &&
+              targetPeerSession.sessionId == entry.sessionId;
+
+          // 3. Jika identitas remoteNodeId pada request diketahui (entry.peerNodeId),
+          //    target session harus memiliki remoteNodeId yang cocok secara eksplisit.
+          //    Jika konteks request tidak lengkap atau ambigu, jangan mengirim ACK.
+          final isPeerNodeMatched =
+              targetPeerSession != null &&
+              entry.peerNodeId != null &&
+              entry.peerNodeId!.trim().isNotEmpty &&
+              targetPeerSession.remoteNodeId != null &&
+              targetPeerSession.remoteNodeId == entry.peerNodeId;
+
+          // 4. Request ID harus cocok dengan catatan request yang relevan pada sesi ini
+          final isRequestIdRecognized =
+              targetPeerSession != null &&
+              targetPeerSession.recognizedRequestIds.contains(reqId);
+
+          // 5. Request ID tidak boleh sama dengan activeRequestId sesi saat ini
+          //    (karena batch aktif saat ini di-ACK secara langsung oleh _handleBlockBatch)
+          final isNotActiveBatchRequest =
+              currentSession == null || reqId != currentSession.activeRequestId;
 
           if (isSameSession &&
-              (currentSession == null ||
-                  entry.requestId != currentSession.activeRequestId)) {
+              isPeerNodeMatched &&
+              isRequestIdRecognized &&
+              isNotActiveBatchRequest) {
             final tips = ledger.tipHashes.toList()..sort();
             final effectiveTips = tips.isEmpty
                 ? [ledger.genesisBlock.blockHash]
                 : tips;
             final orphanAck = DagSyncAckMessage(
               senderNodeId: localNodeId,
-              requestId: entry.requestId!,
+              requestId: reqId,
               acceptedBlockHashes: [candidate.blockHash],
               newTipHashes: effectiveTips,
             );
-            final sent = await _sendMessage(entry.peerEndpointId, orphanAck);
+            final sent = await _sendMessage(peerEndpointId, orphanAck);
             if (sent) _totalSyncAckSent++;
-          } else if (!isSameSession) {
+          } else {
+            // Catat alasan penolakan ACK tertunda secara aman (Stage 5E.4.5.2)
+            final reason = !hasValidSessionId
+                ? 'sessionId orphan null/kosong (wildcard dilarang)'
+                : targetPeerSession == null
+                ? 'sesi peer asal sudah terputus'
+                : targetPeerSession.sessionId != entry.sessionId
+                ? 'sessionId berbeda setelah reconnect/berganti sesi (${entry.sessionId} vs ${targetPeerSession.sessionId})'
+                : !isPeerNodeMatched
+                ? 'peerNodeId tidak cocok atau konteks remoteNodeId tidak lengkap (${entry.peerNodeId} vs ${targetPeerSession.remoteNodeId})'
+                : !isRequestIdRecognized
+                ? 'requestId "$reqId" tidak tercatat dalam riwayat permintaan sesi ini'
+                : 'requestId cocok dengan batch aktif saat ini (di-ACK langsung)';
+
             debugPrint(
-              '[DagGossipSyncEngine] Tidak mengirim DAG_SYNC_ACK tertunda untuk orphan ${candidate.blockHash}: '
-              'sesi pengirim asal (endpoint: ${entry.peerEndpointId}, session: ${entry.sessionId}) sudah tidak aktif atau berganti sesi',
+              '[DagGossipSyncEngine] Tidak mengirim DAG_SYNC_ACK tertunda untuk orphan ${candidate.blockHash}: $reason. '
+              'Kebijakan retry: blok tetap tersimpan persisten; peer akan melakukan rekonsiliasi via inventaris DAG_INV saat tersambung kembali.',
             );
           }
+        } else {
+          debugPrint(
+            '[DagGossipSyncEngine] Tidak mengirim DAG_SYNC_ACK tertunda untuk orphan ${candidate.blockHash}: '
+            'konteks requestId atau peerEndpointId tidak lengkap atau ambigu. '
+            'Kebijakan retry: blok tetap tersimpan persisten; rekonsiliasi dilakukan via DAG_INV.',
+          );
         }
       }
     }
