@@ -556,10 +556,12 @@ class SecurityBlock {
       blockHash: map['blockHash'] as String,
       parentBlockHashes: parents,
       creatorNodeId: map['creatorNodeId'] as String,
-      timestamp: DateTime.fromMillisecondsSinceEpoch(
-        map['timestampMs'] as int,
-        isUtc: true,
-      ),
+      timestamp: map['timestampIso'] != null
+          ? DateTime.parse(map['timestampIso'] as String).toUtc()
+          : DateTime.fromMillisecondsSinceEpoch(
+              map['timestampMs'] as int,
+              isUtc: true,
+            ),
       monotonicMicros: (map['monotonicMicros'] as num?)?.toInt() ?? 0,
       merkleRoot: map['merkleRoot'] as String,
       events: events,

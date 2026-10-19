@@ -379,6 +379,14 @@ class LightweightBlockdagLedger {
     return const LedgerValidationResult.valid();
   }
 
+  /// Memvalidasi dan menerima blok yang dikirimkan oleh node remote.
+  ///
+  /// Mencegah mutasi ledger jika blok melanggar aturan validasi kriptografis,
+  /// integritas Merkle root, format hash, atau urutan kausalitas DAG.
+  LedgerValidationResult acceptRemoteBlock(SecurityBlock block) {
+    return addBlock(block);
+  }
+
   /// Menghasilkan urutan pemutaran ulang linier deterministik (*Deterministic Linear Replay Order*).
   ///
   /// PERINGATAN METODOLOGI & ARSITEKTUR:

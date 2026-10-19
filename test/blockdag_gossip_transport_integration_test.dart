@@ -1292,4 +1292,1253 @@ void main() {
       );
     },
   );
+
+  group('STAGE 5E.4.4 — Block Transfer & Validated Ingestion', () {
+    late FakeMeshTransport transportA;
+    late FakeMeshTransport transportB;
+    late LightweightBlockdagLedger ledgerA;
+    late LightweightBlockdagLedger ledgerB;
+    late InMemoryBlockdagRepository repoA;
+    late InMemoryBlockdagRepository repoB;
+    late DagGossipSyncEngine engineA;
+    late DagGossipSyncEngine engineB;
+    late FakeChatRepository chatRepoA;
+    late FakeChatRepository chatRepoB;
+    late MeshExperimentLogger loggerA;
+    late MeshExperimentLogger loggerB;
+    late ManetRoutingEngine routingA;
+    late ManetRoutingEngine routingB;
+
+    setUp(() {
+      transportA = FakeMeshTransport();
+      transportB = FakeMeshTransport();
+      ledgerA = LightweightBlockdagLedger();
+      ledgerB = LightweightBlockdagLedger();
+      repoA = InMemoryBlockdagRepository();
+      repoB = InMemoryBlockdagRepository();
+      chatRepoA = FakeChatRepository();
+      chatRepoB = FakeChatRepository();
+      loggerA = MeshExperimentLogger();
+      loggerB = MeshExperimentLogger();
+
+      engineA = DagGossipSyncEngine(
+        transport: transportA,
+        localNodeId: 'NODE-A',
+        ledger: ledgerA,
+        repository: repoA,
+        isEnabled: true,
+      );
+
+      engineB = DagGossipSyncEngine(
+        transport: transportB,
+        localNodeId: 'NODE-B',
+        ledger: ledgerB,
+        repository: repoB,
+        isEnabled: true,
+      );
+
+      routingA = ManetRoutingEngine(
+        transport: transportA,
+        identityManager: NodeIdentityManager(),
+        repository: chatRepoA,
+        experimentLogger: loggerA,
+        gossipSyncEngine: engineA,
+      );
+
+      routingB = ManetRoutingEngine(
+        transport: transportB,
+        identityManager: NodeIdentityManager(),
+        repository: chatRepoB,
+        experimentLogger: loggerB,
+        gossipSyncEngine: engineB,
+      );
+    });
+
+    tearDown(() {
+      routingA.dispose();
+      routingB.dispose();
+      engineA.dispose();
+      engineB.dispose();
+      ManetRoutingHolder.reset();
+    });
+
+    Future<void> establishSession() async {
+      transportA.simulateIncomingConnectionRequest(
+        endpointId: 'ep-b',
+        endpointName: 'Node B',
+      );
+      await transportA.acceptConnection(endpointId: 'ep-b');
+
+      transportB.simulateIncomingConnectionRequest(
+        endpointId: 'ep-a',
+        endpointName: 'Node A',
+      );
+      await transportB.acceptConnection(endpointId: 'ep-a');
+
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final helloPayloadsA = transportA.sentPayloads
+          .where((p) => DagGossipSyncEngine.isGossipPayload(p.bytes))
+          .toList();
+      for (final p in helloPayloadsA) {
+        transportB.simulateIncomingPayload(endpointId: 'ep-a', bytes: p.bytes);
+      }
+
+      final helloPayloadsB = transportB.sentPayloads
+          .where((p) => DagGossipSyncEngine.isGossipPayload(p.bytes))
+          .toList();
+      for (final p in helloPayloadsB) {
+        transportA.simulateIncomingPayload(endpointId: 'ep-b', bytes: p.bytes);
+      }
+
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final invPayloadsA = transportA.sentPayloads
+          .where((p) => DagGossipSyncEngine.isGossipPayload(p.bytes))
+          .toList();
+      for (final p in invPayloadsA) {
+        transportB.simulateIncomingPayload(endpointId: 'ep-a', bytes: p.bytes);
+      }
+
+      final invPayloadsB = transportB.sentPayloads
+          .where((p) => DagGossipSyncEngine.isGossipPayload(p.bytes))
+          .toList();
+      for (final p in invPayloadsB) {
+        transportA.simulateIncomingPayload(endpointId: 'ep-b', bytes: p.bytes);
+      }
+
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      transportA.clearSentPayloads();
+      transportB.clearSentPayloads();
+    }
+
+    test('1. Node requests blocks that it does not possess', () async {
+      await establishSession();
+
+      final blockA1 = ledgerA.createBlock(
+        creatorNodeId: 'NODE-A',
+        validationProof: {'flushReason': 'manual', 'creatorNodeId': 'NODE-A'},
+      );
+
+      final invMsg = DagInvMessage(
+        senderNodeId: 'NODE-A',
+        senderTimestamp: DateTime.now().toUtc().millisecondsSinceEpoch,
+        tipHashes: [blockA1.blockHash],
+        recentBlockHashes: [blockA1.blockHash],
+      );
+      transportB.clearSentPayloads();
+      transportB.simulateIncomingPayload(
+        endpointId: 'ep-a',
+        bytes: DagGossipCodec.encode(invMsg),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final sessionB = engineB.getSession('ep-a')!;
+      expect(sessionB.missingBlockHashes, contains(blockA1.blockHash));
+      expect(sessionB.activeRequestId, isNotNull);
+      expect(sessionB.activeRequestedHashes, contains(blockA1.blockHash));
+
+      final getBlocksPayloads = transportB.sentPayloads
+          .map((p) => DagGossipCodec.decode(p.bytes).message)
+          .whereType<DagGetBlocksMessage>()
+          .toList();
+      expect(getBlocksPayloads.length, equals(1));
+      expect(
+        getBlocksPayloads.first.requestedBlockHashes,
+        equals([blockA1.blockHash]),
+      );
+      expect(
+        getBlocksPayloads.first.requestId,
+        equals(sessionB.activeRequestId),
+      );
+    });
+
+    test('2. Requester limits DAG_GET_BLOCKS to at most 4 hashes', () async {
+      await establishSession();
+
+      final unknownHashes = List.generate(
+        6,
+        (i) => computeSha256('missing-hash-$i'),
+      );
+      final invMsg = DagInvMessage(
+        senderNodeId: 'NODE-A',
+        senderTimestamp: DateTime.now().toUtc().millisecondsSinceEpoch,
+        tipHashes: [unknownHashes.first],
+        recentBlockHashes: unknownHashes,
+      );
+
+      transportB.clearSentPayloads();
+      transportB.simulateIncomingPayload(
+        endpointId: 'ep-a',
+        bytes: DagGossipCodec.encode(invMsg),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final sessionB = engineB.getSession('ep-a')!;
+      expect(sessionB.missingBlockHashes.length, equals(6));
+
+      final getBlocksPayloads = transportB.sentPayloads
+          .map((p) => DagGossipCodec.decode(p.bytes).message)
+          .whereType<DagGetBlocksMessage>()
+          .toList();
+      expect(getBlocksPayloads.length, equals(1));
+      expect(
+        getBlocksPayloads.first.requestedBlockHashes.length,
+        equals(kMaxGetBlocksHashes),
+      );
+      expect(getBlocksPayloads.first.requestedBlockHashes.length, equals(4));
+    });
+
+    test('3. Source serves only requested and available blocks', () async {
+      await establishSession();
+
+      final blockA1 = ledgerA.createBlock(
+        creatorNodeId: 'NODE-A',
+        validationProof: {'flushReason': 'manual', 'creatorNodeId': 'NODE-A'},
+      );
+      final blockA2 = ledgerA.createBlock(
+        creatorNodeId: 'NODE-A',
+        validationProof: {'flushReason': 'manual', 'creatorNodeId': 'NODE-A'},
+      );
+
+      final unknownHash = computeSha256('never-existed-block');
+
+      final getBlocks = DagGetBlocksMessage(
+        senderNodeId: 'NODE-B',
+        requestId: 'req-test-3',
+        requestedBlockHashes: [blockA1.blockHash, unknownHash],
+      );
+
+      transportA.clearSentPayloads();
+      transportA.simulateIncomingPayload(
+        endpointId: 'ep-b',
+        bytes: DagGossipCodec.encode(getBlocks),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final batchPayloads = transportA.sentPayloads
+          .map((p) => DagGossipCodec.decode(p.bytes).message)
+          .whereType<DagBlockBatchMessage>()
+          .toList();
+      expect(batchPayloads.length, equals(1));
+      expect(batchPayloads.first.blocks.length, equals(1));
+      expect(
+        batchPayloads.first.blocks.first.blockHash,
+        equals(blockA1.blockHash),
+      );
+      expect(
+        batchPayloads.first.blocks.any((b) => b.blockHash == blockA2.blockHash),
+        isFalse,
+      );
+    });
+
+    test('4. Unknown or pruned hashes are handled safely', () async {
+      await establishSession();
+
+      // Part A: Unknown hash -> DAG_REJECT
+      final unknownHash = computeSha256('totally-unknown-block');
+      final getUnknown = DagGetBlocksMessage(
+        senderNodeId: 'NODE-B',
+        requestId: 'req-unknown-4',
+        requestedBlockHashes: [unknownHash],
+      );
+
+      transportA.clearSentPayloads();
+      transportA.simulateIncomingPayload(
+        endpointId: 'ep-b',
+        bytes: DagGossipCodec.encode(getUnknown),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final rejectPayloads = transportA.sentPayloads
+          .map((p) => DagGossipCodec.decode(p.bytes).message)
+          .whereType<DagRejectMessage>()
+          .toList();
+      expect(rejectPayloads.length, equals(1));
+      expect(
+        rejectPayloads.first.errorCode,
+        equals(DagRejectCode.emptyPayload),
+      );
+
+      // Part B: Pruned block -> DAG_PRUNED_NOTICE
+      for (int i = 0; i < 5; i++) {
+        ledgerA.createBlock(
+          creatorNodeId: 'NODE-A',
+          validationProof: {'flushReason': 'manual', 'creatorNodeId': 'NODE-A'},
+        );
+      }
+      final checkpoint = ledgerA.prune(maxRetention: 2);
+      final prunedHash = checkpoint!.prunedBlockHashes.first;
+
+      final getPruned = DagGetBlocksMessage(
+        senderNodeId: 'NODE-B',
+        requestId: 'req-pruned-4',
+        requestedBlockHashes: [prunedHash],
+      );
+
+      transportA.clearSentPayloads();
+      transportA.simulateIncomingPayload(
+        endpointId: 'ep-b',
+        bytes: DagGossipCodec.encode(getPruned),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final prunedPayloads = transportA.sentPayloads
+          .map((p) => DagGossipCodec.decode(p.bytes).message)
+          .whereType<DagPrunedNoticeMessage>()
+          .toList();
+      expect(prunedPayloads.length, equals(1));
+      expect(prunedPayloads.first.prunedBlockHashes, contains(prunedHash));
+
+      final sessionB = engineB.getSession('ep-a')!;
+      sessionB.missingBlockHashes.add(prunedHash);
+      sessionB.activeRequestId = 'req-pruned-4';
+
+      transportB.simulateIncomingPayload(
+        endpointId: 'ep-a',
+        bytes: DagGossipCodec.encode(prunedPayloads.first),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(sessionB.missingBlockHashes.contains(prunedHash), isFalse);
+      expect(sessionB.activeRequestId, isNull);
+    });
+
+    test('5. Batch payload strictly conforms to 16 KiB limit', () async {
+      await establishSession();
+
+      final blockHashes = <String>[];
+      for (int i = 0; i < 4; i++) {
+        ledgerA.addPendingEvent(
+          SecurityAuditEvent(
+            eventId: 'evt-batch-$i',
+            eventType: AuditEventType.trustUpdate,
+            observerNodeId: 'NODE-A',
+            targetNodeId: 'NODE-PEER',
+            timestamp: DateTime.now().toUtc(),
+            monotonicMicros: 1000 + i,
+            metadata: {
+              'oldScore': 0.7,
+              'newScore': 0.8,
+              'delta': 0.1,
+              'evidenceType': 'forwarding_verified',
+              'reason': 'trust_updated_ok',
+            },
+          ),
+        );
+        final b = ledgerA.createBlock(
+          creatorNodeId: 'NODE-A',
+          validationProof: {'flushReason': 'manual', 'creatorNodeId': 'NODE-A'},
+        );
+        blockHashes.add(b.blockHash);
+      }
+
+      final getBlocks = DagGetBlocksMessage(
+        senderNodeId: 'NODE-B',
+        requestId: 'req-batch-5',
+        requestedBlockHashes: blockHashes,
+      );
+
+      transportA.clearSentPayloads();
+      transportA.simulateIncomingPayload(
+        endpointId: 'ep-b',
+        bytes: DagGossipCodec.encode(getBlocks),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final sentPayload = transportA.sentPayloads.first;
+      expect(
+        sentPayload.bytes.length,
+        lessThanOrEqualTo(kMaxBatchPayloadBytes),
+      );
+      expect(sentPayload.bytes.length, greaterThan(200));
+
+      final decoded = DagGossipCodec.decode(sentPayload.bytes);
+      expect(decoded.isSuccess, isTrue);
+      final batch = decoded.message as DagBlockBatchMessage;
+      expect(batch.blocks.length, equals(4));
+    });
+
+    test(
+      '6. Oversized batch payload is rejected safely without truncation or mutation',
+      () async {
+        await establishSession();
+
+        final hugeReason = 'A' * (kMaxBatchPayloadBytes + 100);
+        final fakeRawMap = {
+          'protocol': kDagGossipProtocolName,
+          'version': kDagGossipProtocolVersion,
+          'type': DagGossipMessageType.blockBatch.wireName,
+          'senderNodeId': 'NODE-A',
+          'requestId': 'req-oversized-6',
+          'batchIndex': 1,
+          'totalBatches': 1,
+          'blocks': [
+            {
+              'version': 1,
+              'index': 1,
+              'blockHash': computeSha256('huge-block'),
+              'parentBlockHashes': [ledgerB.genesisBlock.blockHash],
+              'creatorNodeId': 'NODE-A',
+              'timestampMs': DateTime.now().toUtc().millisecondsSinceEpoch,
+              'timestampIso': DateTime.now().toUtc().toIso8601String(),
+              'monotonicMicros': 100,
+              'eventsCount': 0,
+              'merkleRoot': computeSha256('empty'),
+              'validationProof': {
+                'flushReason': 'manual',
+                'creatorNodeId': 'NODE-A',
+                'reason': hugeReason,
+              },
+              'events': [],
+            },
+          ],
+        };
+
+        final rawBytes = Uint8List.fromList(
+          utf8.encode(jsonEncode(fakeRawMap)),
+        );
+        expect(rawBytes.length, greaterThan(kMaxBatchPayloadBytes));
+
+        final decodeResult = DagGossipCodec.decode(rawBytes);
+        expect(decodeResult.isSuccess, isFalse);
+        expect(
+          decodeResult.errorCode,
+          equals(DagRejectCode.batchPayloadTooLarge),
+        );
+
+        final sessionB = engineB.getSession('ep-a')!;
+        sessionB.activeRequestId = 'req-oversized-6';
+
+        transportB.clearSentPayloads();
+        transportB.simulateIncomingPayload(endpointId: 'ep-a', bytes: rawBytes);
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        expect(ledgerB.activeBlocksCount, equals(1));
+      },
+    );
+
+    test(
+      '7. Valid remote block with known parent is accepted and ACKed',
+      () async {
+        await establishSession();
+
+        final blockA1 = ledgerA.createBlock(
+          creatorNodeId: 'NODE-A',
+          validationProof: {'flushReason': 'manual', 'creatorNodeId': 'NODE-A'},
+        );
+
+        final sessionB = engineB.getSession('ep-a')!;
+        sessionB.missingBlockHashes.add(blockA1.blockHash);
+        sessionB.activeRequestId = 'req-valid-7';
+        sessionB.activeRequestedHashes.add(blockA1.blockHash);
+
+        final batch = DagBlockBatchMessage(
+          senderNodeId: 'NODE-A',
+          requestId: 'req-valid-7',
+          batchIndex: 1,
+          totalBatches: 1,
+          blocks: [blockA1],
+        );
+
+        transportB.clearSentPayloads();
+        transportB.simulateIncomingPayload(
+          endpointId: 'ep-a',
+          bytes: DagGossipCodec.encode(batch),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        expect(ledgerB.getBlock(blockA1.blockHash), isNotNull);
+        expect(ledgerB.activeBlocksCount, equals(2));
+        expect(
+          sessionB.missingBlockHashes.contains(blockA1.blockHash),
+          isFalse,
+        );
+        expect(sessionB.knownPeerBlockHashes, contains(blockA1.blockHash));
+        expect(engineB.totalRemoteBlocksAccepted, equals(1));
+
+        final acks = transportB.sentPayloads
+            .map((p) => DagGossipCodec.decode(p.bytes).message)
+            .whereType<DagSyncAckMessage>()
+            .toList();
+        expect(acks.length, equals(1));
+        expect(acks.first.requestId, equals('req-valid-7'));
+        expect(acks.first.acceptedBlockHashes, equals([blockA1.blockHash]));
+
+        final savedState = await repoB.loadState();
+        expect(savedState, isNotNull);
+        expect(
+          savedState!.blocks.any((b) => b.blockHash == blockA1.blockHash),
+          isTrue,
+        );
+      },
+    );
+
+    test(
+      '8. Batch blocks are sorted and ingested topologically parent-first',
+      () async {
+        await establishSession();
+
+        final blockA1 = ledgerA.createBlock(
+          creatorNodeId: 'NODE-A',
+          validationProof: {'flushReason': 'manual', 'creatorNodeId': 'NODE-A'},
+        );
+        final blockA2 = ledgerA.createBlock(
+          creatorNodeId: 'NODE-A',
+          validationProof: {'flushReason': 'manual', 'creatorNodeId': 'NODE-A'},
+        );
+        expect(blockA2.parentBlockHashes, contains(blockA1.blockHash));
+
+        final getBlocks = DagGetBlocksMessage(
+          senderNodeId: 'NODE-B',
+          requestId: 'req-topo-8',
+          requestedBlockHashes: [blockA2.blockHash, blockA1.blockHash],
+        );
+
+        transportA.clearSentPayloads();
+        transportA.simulateIncomingPayload(
+          endpointId: 'ep-b',
+          bytes: DagGossipCodec.encode(getBlocks),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        final sentBatch = transportA.sentPayloads
+            .map((p) => DagGossipCodec.decode(p.bytes).message)
+            .whereType<DagBlockBatchMessage>()
+            .first;
+
+        expect(sentBatch.blocks.first.blockHash, equals(blockA1.blockHash));
+        expect(sentBatch.blocks.last.blockHash, equals(blockA2.blockHash));
+
+        final sessionB = engineB.getSession('ep-a')!;
+        sessionB.missingBlockHashes.addAll([
+          blockA1.blockHash,
+          blockA2.blockHash,
+        ]);
+        sessionB.activeRequestId = 'req-topo-8';
+
+        transportB.clearSentPayloads();
+        transportB.simulateIncomingPayload(
+          endpointId: 'ep-a',
+          bytes: DagGossipCodec.encode(sentBatch),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        expect(ledgerB.getBlock(blockA1.blockHash), isNotNull);
+        expect(ledgerB.getBlock(blockA2.blockHash), isNotNull);
+        expect(ledgerB.activeBlocksCount, equals(3));
+        expect(engineB.totalRemoteBlocksAccepted, equals(2));
+      },
+    );
+
+    test(
+      '9. Blocks with corrupted Merkle root or blockHash are rejected',
+      () async {
+        await establishSession();
+
+        final validBlock = ledgerA.createBlock(
+          creatorNodeId: 'NODE-A',
+          validationProof: {'flushReason': 'manual', 'creatorNodeId': 'NODE-A'},
+        );
+
+        final badMerkleBlock = SecurityBlock(
+          version: validBlock.version,
+          index: validBlock.index,
+          blockHash: validBlock.blockHash,
+          parentBlockHashes: validBlock.parentBlockHashes,
+          creatorNodeId: validBlock.creatorNodeId,
+          timestamp: validBlock.timestamp,
+          monotonicMicros: validBlock.monotonicMicros,
+          merkleRoot: computeSha256('tampered-merkle-root'),
+          events: validBlock.events,
+          validationProof: validBlock.validationProof,
+        );
+
+        final sessionB = engineB.getSession('ep-a')!;
+        sessionB.activeRequestId = 'req-bad-merkle-9';
+
+        transportB.clearSentPayloads();
+        final batchBadMerkle = DagBlockBatchMessage(
+          senderNodeId: 'NODE-A',
+          requestId: 'req-bad-merkle-9',
+          batchIndex: 1,
+          totalBatches: 1,
+          blocks: [badMerkleBlock],
+        );
+
+        transportB.simulateIncomingPayload(
+          endpointId: 'ep-a',
+          bytes: DagGossipCodec.encode(batchBadMerkle),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        expect(ledgerB.getBlock(badMerkleBlock.blockHash), isNull);
+        expect(ledgerB.activeBlocksCount, equals(1));
+        expect(engineB.totalRemoteBlocksRejected, equals(1));
+
+        final rejects = transportB.sentPayloads
+            .map((p) => DagGossipCodec.decode(p.bytes).message)
+            .whereType<DagRejectMessage>()
+            .toList();
+        expect(rejects.length, equals(1));
+        expect(
+          rejects.first.errorCode,
+          equals(DagRejectCode.invalidMerkleRoot),
+        );
+      },
+    );
+
+    test(
+      '10. Blocks violating privacy allowlist are rejected without ingestion',
+      () async {
+        await establishSession();
+
+        final badEvent = SecurityAuditEvent(
+          eventId: 'bad-evt-10',
+          eventType: AuditEventType.idsDetection,
+          observerNodeId: 'NODE-A',
+          targetNodeId: 'NODE-B',
+          timestamp: DateTime.now().toUtc(),
+          monotonicMicros: 100,
+          metadata: {
+            'status': 'detected',
+            'reason': 'normal',
+            'body': 'unauthorized private chat text',
+          },
+        );
+
+        final badBlock = SecurityBlock.create(
+          index: 1,
+          parentBlockHashes: [ledgerB.genesisBlock.blockHash],
+          creatorNodeId: 'NODE-A',
+          events: [badEvent],
+          validationProof: {'flushReason': 'manual', 'creatorNodeId': 'NODE-A'},
+        );
+
+        final sessionB = engineB.getSession('ep-a')!;
+        sessionB.activeRequestId = 'req-privacy-10';
+
+        transportB.clearSentPayloads();
+        final batch = DagBlockBatchMessage(
+          senderNodeId: 'NODE-A',
+          requestId: 'req-privacy-10',
+          batchIndex: 1,
+          totalBatches: 1,
+          blocks: [badBlock],
+        );
+
+        transportB.simulateIncomingPayload(
+          endpointId: 'ep-a',
+          bytes: DagGossipCodec.encode(batch),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        expect(ledgerB.getBlock(badBlock.blockHash), isNull);
+        expect(ledgerB.activeBlocksCount, equals(1));
+        expect(engineB.totalRemoteBlocksRejected, equals(1));
+
+        final rejects = transportB.sentPayloads
+            .map((p) => DagGossipCodec.decode(p.bytes).message)
+            .whereType<DagRejectMessage>()
+            .toList();
+        expect(rejects.length, equals(1));
+        expect(rejects.first.errorCode, equals(DagRejectCode.privacyViolation));
+      },
+    );
+
+    test(
+      '11. Duplicate blocks do not cause duplicate ledger mutations or duplicate events',
+      () async {
+        await establishSession();
+
+        final blockA1 = ledgerA.createBlock(
+          creatorNodeId: 'NODE-A',
+          validationProof: {'flushReason': 'manual', 'creatorNodeId': 'NODE-A'},
+        );
+
+        final sessionB = engineB.getSession('ep-a')!;
+        sessionB.activeRequestId = 'req-dup-1';
+        transportB.simulateIncomingPayload(
+          endpointId: 'ep-a',
+          bytes: DagGossipCodec.encode(
+            DagBlockBatchMessage(
+              senderNodeId: 'NODE-A',
+              requestId: 'req-dup-1',
+              batchIndex: 1,
+              totalBatches: 1,
+              blocks: [blockA1],
+            ),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(ledgerB.activeBlocksCount, equals(2));
+        expect(engineB.totalRemoteBlocksAccepted, equals(1));
+
+        sessionB.activeRequestId = 'req-dup-2';
+        transportB.simulateIncomingPayload(
+          endpointId: 'ep-a',
+          bytes: DagGossipCodec.encode(
+            DagBlockBatchMessage(
+              senderNodeId: 'NODE-A',
+              requestId: 'req-dup-2',
+              batchIndex: 1,
+              totalBatches: 1,
+              blocks: [blockA1],
+            ),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        expect(ledgerB.activeBlocksCount, equals(2));
+        expect(engineB.totalRemoteBlocksAccepted, equals(1));
+      },
+    );
+
+    test(
+      '12. Block with missing parent fails validation and is rejected',
+      () async {
+        await establishSession();
+
+        final orphanBlock = SecurityBlock.create(
+          index: 5,
+          parentBlockHashes: [computeSha256('non-existent-parent-hash')],
+          creatorNodeId: 'NODE-A',
+          events: [],
+          validationProof: {'flushReason': 'manual', 'creatorNodeId': 'NODE-A'},
+        );
+
+        final sessionB = engineB.getSession('ep-a')!;
+        sessionB.activeRequestId = 'req-orphan-12';
+
+        transportB.clearSentPayloads();
+        transportB.simulateIncomingPayload(
+          endpointId: 'ep-a',
+          bytes: DagGossipCodec.encode(
+            DagBlockBatchMessage(
+              senderNodeId: 'NODE-A',
+              requestId: 'req-orphan-12',
+              batchIndex: 1,
+              totalBatches: 1,
+              blocks: [orphanBlock],
+            ),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        expect(ledgerB.getBlock(orphanBlock.blockHash), isNull);
+        expect(ledgerB.activeBlocksCount, equals(1));
+        expect(engineB.totalRemoteBlocksRejected, equals(1));
+
+        final rejects = transportB.sentPayloads
+            .map((p) => DagGossipCodec.decode(p.bytes).message)
+            .whereType<DagRejectMessage>()
+            .toList();
+        expect(rejects.length, equals(1));
+        expect(
+          rejects.first.errorCode,
+          equals(DagRejectCode.invalidBlockStructure),
+        );
+      },
+    );
+
+    test(
+      '13. Response with mismatched requestId or unsolicited peer is ignored',
+      () async {
+        await establishSession();
+
+        final blockA1 = ledgerA.createBlock(
+          creatorNodeId: 'NODE-A',
+          validationProof: {'flushReason': 'manual', 'creatorNodeId': 'NODE-A'},
+        );
+
+        final sessionB = engineB.getSession('ep-a')!;
+        sessionB.activeRequestId = 'req-expected-13';
+
+        final batchWrongId = DagBlockBatchMessage(
+          senderNodeId: 'NODE-A',
+          requestId: 'req-unexpected-999',
+          batchIndex: 1,
+          totalBatches: 1,
+          blocks: [blockA1],
+        );
+
+        transportB.clearSentPayloads();
+        transportB.simulateIncomingPayload(
+          endpointId: 'ep-a',
+          bytes: DagGossipCodec.encode(batchWrongId),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        expect(ledgerB.getBlock(blockA1.blockHash), isNull);
+        expect(ledgerB.activeBlocksCount, equals(1));
+        expect(sessionB.activeRequestId, equals('req-expected-13'));
+        expect(transportB.sentPayloads, isEmpty);
+      },
+    );
+
+    test(
+      '14. sendBytes returning false or throwing exception is handled gracefully',
+      () async {
+        final failingTransport = ControllableFakeMeshTransport(
+          sendResult: false,
+        );
+        final throwingTransport = ControllableFakeMeshTransport(
+          shouldThrow: true,
+        );
+
+        final testLedger = LightweightBlockdagLedger();
+        final engineFailing = DagGossipSyncEngine(
+          transport: failingTransport,
+          localNodeId: 'NODE-FAIL',
+          ledger: testLedger,
+          isEnabled: true,
+        );
+
+        failingTransport.simulateIncomingConnectionRequest(
+          endpointId: 'ep-f',
+          endpointName: 'Peer',
+        );
+        await failingTransport.acceptConnection(endpointId: 'ep-f');
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        final sessionF = engineFailing.getSession('ep-f')!;
+        sessionF.missingBlockHashes.add(computeSha256('hash-fail'));
+        final resFail = await engineFailing.requestMissingBlocks('ep-f');
+        expect(resFail, isFalse);
+        expect(sessionF.activeRequestId, isNull);
+
+        final engineThrowing = DagGossipSyncEngine(
+          transport: throwingTransport,
+          localNodeId: 'NODE-THROW',
+          ledger: testLedger,
+          isEnabled: true,
+        );
+
+        throwingTransport.simulateIncomingConnectionRequest(
+          endpointId: 'ep-t',
+          endpointName: 'Peer',
+        );
+        await throwingTransport.acceptConnection(endpointId: 'ep-t');
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        final sessionT = engineThrowing.getSession('ep-t')!;
+        sessionT.missingBlockHashes.add(computeSha256('hash-throw'));
+        final resThrow = await engineThrowing.requestMissingBlocks('ep-t');
+        expect(resThrow, isFalse);
+        expect(sessionT.activeRequestId, isNull);
+
+        engineFailing.dispose();
+        engineThrowing.dispose();
+      },
+    );
+
+    test(
+      '15. Disconnection or dispose during active transfer clears request state cleanly',
+      () async {
+        await establishSession();
+
+        final sessionB = engineB.getSession('ep-a')!;
+        sessionB.activeRequestId = 'req-pending-15';
+        sessionB.activeRequestedHashes.add(computeSha256('hash-15'));
+
+        transportB.simulateDisconnection('ep-a');
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        expect(engineB.getSession('ep-a'), isNull);
+
+        engineB.dispose();
+        expect(engineB.isDisposed, isTrue);
+        expect(engineB.activeSessions, isEmpty);
+      },
+    );
+
+    test(
+      '16. Rejected blocks do not alter ledger state or persistent repository',
+      () async {
+        await establishSession();
+
+        await repoB.saveState(ledgerB.exportPersistedState());
+        final baselineState = await repoB.loadState();
+        final baselineTips = ledgerB.tipHashes.toSet();
+        final baselineCount = ledgerB.activeBlocksCount;
+
+        final validBlock = ledgerA.createBlock(
+          creatorNodeId: 'NODE-A',
+          validationProof: {'flushReason': 'manual', 'creatorNodeId': 'NODE-A'},
+        );
+        final corruptedBlock = SecurityBlock(
+          version: validBlock.version,
+          index: validBlock.index,
+          blockHash:
+              '0000000000000000000000000000000000000000000000000000000000000000',
+          parentBlockHashes: validBlock.parentBlockHashes,
+          creatorNodeId: validBlock.creatorNodeId,
+          timestamp: validBlock.timestamp,
+          monotonicMicros: validBlock.monotonicMicros,
+          merkleRoot: validBlock.merkleRoot,
+          events: validBlock.events,
+          validationProof: validBlock.validationProof,
+        );
+
+        final sessionB = engineB.getSession('ep-a')!;
+        sessionB.activeRequestId = 'req-alter-16';
+
+        transportB.simulateIncomingPayload(
+          endpointId: 'ep-a',
+          bytes: DagGossipCodec.encode(
+            DagBlockBatchMessage(
+              senderNodeId: 'NODE-A',
+              requestId: 'req-alter-16',
+              batchIndex: 1,
+              totalBatches: 1,
+              blocks: [corruptedBlock],
+            ),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        expect(ledgerB.activeBlocksCount, equals(baselineCount));
+        expect(ledgerB.tipHashes, equals(baselineTips));
+
+        final currentState = await repoB.loadState();
+        expect(
+          currentState!.blocks.length,
+          equals(baselineState!.blocks.length),
+        );
+        expect(currentState.tipHashes, equals(baselineState.tipHashes));
+      },
+    );
+
+    test(
+      '17. DAG_SYNC_ACK acknowledges ONLY genuinely accepted blocks',
+      () async {
+        await establishSession();
+
+        final goodBlock = ledgerA.createBlock(
+          creatorNodeId: 'NODE-A',
+          validationProof: {'flushReason': 'manual', 'creatorNodeId': 'NODE-A'},
+        );
+        final badBlock = SecurityBlock(
+          version: 1,
+          index: 2,
+          blockHash: computeSha256('bad-block-17'),
+          parentBlockHashes: [goodBlock.blockHash],
+          creatorNodeId: 'NODE-A',
+          timestamp: DateTime.now().toUtc(),
+          monotonicMicros: 200,
+          merkleRoot: computeSha256('bad-merkle-17'),
+          events: [],
+          validationProof: {'flushReason': 'manual', 'creatorNodeId': 'NODE-A'},
+        );
+
+        final sessionB = engineB.getSession('ep-a')!;
+        sessionB.activeRequestId = 'req-mixed-17';
+        sessionB.missingBlockHashes.addAll([
+          goodBlock.blockHash,
+          badBlock.blockHash,
+        ]);
+
+        transportB.clearSentPayloads();
+        transportB.simulateIncomingPayload(
+          endpointId: 'ep-a',
+          bytes: DagGossipCodec.encode(
+            DagBlockBatchMessage(
+              senderNodeId: 'NODE-A',
+              requestId: 'req-mixed-17',
+              batchIndex: 1,
+              totalBatches: 1,
+              blocks: [goodBlock, badBlock],
+            ),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        expect(ledgerB.getBlock(goodBlock.blockHash), isNotNull);
+        expect(ledgerB.getBlock(badBlock.blockHash), isNull);
+
+        final acks = transportB.sentPayloads
+            .map((p) => DagGossipCodec.decode(p.bytes).message)
+            .whereType<DagSyncAckMessage>()
+            .toList();
+        expect(acks.length, equals(1));
+        expect(acks.first.acceptedBlockHashes, equals([goodBlock.blockHash]));
+        expect(
+          acks.first.acceptedBlockHashes.contains(badBlock.blockHash),
+          isFalse,
+        );
+      },
+    );
+
+    test(
+      '18. Config A/B generate 0 gossip packets; Config C transfers only when explicitly enabled',
+      () async {
+        final fakeTransport = FakeMeshTransport();
+        final chatRepo = FakeChatRepository();
+        final logger = MeshExperimentLogger();
+
+        ManetRoutingHolder.reset();
+        final routingA = ManetRoutingEngine(
+          transport: fakeTransport,
+          identityManager: NodeIdentityManager(),
+          repository: chatRepo,
+          experimentLogger: logger,
+        );
+        ManetRoutingHolder.setInstance(routingA);
+
+        fakeTransport.clearSentPayloads();
+        fakeTransport.simulateIncomingConnectionRequest(
+          endpointId: 'ep-cfg-a',
+          endpointName: 'Peer',
+        );
+        await fakeTransport.acceptConnection(endpointId: 'ep-cfg-a');
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(
+          fakeTransport.sentPayloads.any(
+            (p) => DagGossipSyncEngine.isGossipPayload(p.bytes),
+          ),
+          isFalse,
+        );
+
+        ManetRoutingHolder.setIdsDetector(
+          SelectiveForwardingDetector(localNodeId: 'NODE-LOCAL'),
+        );
+        ManetRoutingHolder.setTrustManager(
+          DynamicTrustManager(localNodeId: 'NODE-LOCAL'),
+        );
+        expect(ManetRoutingHolder.enableBlockdagReplication, isFalse);
+
+        fakeTransport.clearSentPayloads();
+        fakeTransport.simulateIncomingConnectionRequest(
+          endpointId: 'ep-cfg-b',
+          endpointName: 'Peer',
+        );
+        await fakeTransport.acceptConnection(endpointId: 'ep-cfg-b');
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(
+          fakeTransport.sentPayloads.any(
+            (p) => DagGossipSyncEngine.isGossipPayload(p.bytes),
+          ),
+          isFalse,
+        );
+
+        final engineC = DagGossipSyncEngine(
+          transport: fakeTransport,
+          localNodeId: 'NODE-LOCAL',
+          ledger: LightweightBlockdagLedger(),
+          isEnabled: false,
+        );
+        ManetRoutingHolder.setGossipSyncEngine(engineC);
+        expect(engineC.isEnabled, isFalse);
+
+        ManetRoutingHolder.setEnableBlockdagReplication(true);
+        expect(ManetRoutingHolder.enableBlockdagReplication, isTrue);
+        expect(engineC.isEnabled, isTrue);
+
+        fakeTransport.clearSentPayloads();
+        fakeTransport.simulateIncomingConnectionRequest(
+          endpointId: 'ep-cfg-c',
+          endpointName: 'Peer',
+        );
+        await fakeTransport.acceptConnection(endpointId: 'ep-cfg-c');
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(
+          fakeTransport.sentPayloads.any(
+            (p) => DagGossipSyncEngine.isGossipPayload(p.bytes),
+          ),
+          isTrue,
+        );
+
+        routingA.dispose();
+        engineC.dispose();
+      },
+    );
+
+    test(
+      '19. Chat envelopes, handshakes, HOP_ACK, and E2E_ACK function normally during gossip transfer',
+      () async {
+        final fakeTransport = FakeMeshTransport();
+        final chatRepo = FakeChatRepository();
+        final logger = MeshExperimentLogger();
+        final testLedger = LightweightBlockdagLedger();
+
+        final gossip = DagGossipSyncEngine(
+          transport: fakeTransport,
+          localNodeId: 'NODE-ROUTER',
+          ledger: testLedger,
+          isEnabled: true,
+        );
+
+        final routing = ManetRoutingEngine(
+          transport: fakeTransport,
+          identityManager: NodeIdentityManager(),
+          repository: chatRepo,
+          experimentLogger: logger,
+          gossipSyncEngine: gossip,
+          enableHopAck: true,
+        );
+
+        // 1. Handshake
+        final hsEnv = MessageEnvelope(
+          envelopeId: 'hs-19',
+          type: MessageEnvelope.typeHandshake,
+          senderId: 'NODE-SENDER',
+          senderName: 'Sender Node',
+          recipientId: 'BROADCAST',
+          createdAt: DateTime.now().millisecondsSinceEpoch,
+          routeTrace: const ['NODE-SENDER'],
+          payload: {'nodeId': 'NODE-SENDER', 'nodeName': 'Sender Node'},
+        );
+        fakeTransport.simulateIncomingPayload(
+          endpointId: 'ep-19',
+          bytes: hsEnv.toBytes(),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(routing.neighborTable.getPeerByNodeId('NODE-SENDER'), isNotNull);
+
+        // 2. Chat message
+        final chatEnv = MessageEnvelope(
+          envelopeId: 'chat-19',
+          type: MessageEnvelope.typeChat,
+          senderId: 'NODE-SENDER',
+          senderName: 'Sender Node',
+          recipientId: routing.localNodeId,
+          createdAt: DateTime.now().millisecondsSinceEpoch,
+          routeTrace: const ['NODE-SENDER'],
+          payload: {
+            'messageId': 'msg-19',
+            'senderId': 'NODE-SENDER',
+            'senderName': 'Sender Node',
+            'recipientId': routing.localNodeId,
+            'text': 'Evakuasi zona utara',
+            'timestamp': DateTime.now().millisecondsSinceEpoch,
+          },
+        );
+        fakeTransport.simulateIncomingPayload(
+          endpointId: 'ep-19',
+          bytes: chatEnv.toBytes(),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(
+          chatRepo.savedMessages.any((m) => m.text == 'Evakuasi zona utara'),
+          isTrue,
+        );
+
+        // 3. HOP_ACK
+        final hopAckEnv = MessageEnvelope(
+          envelopeId: 'hop-ack-19',
+          type: MessageEnvelope.typeHopAck,
+          senderId: 'NODE-SENDER',
+          senderName: 'Sender Node',
+          recipientId: routing.localNodeId,
+          createdAt: DateTime.now().millisecondsSinceEpoch,
+          routeTrace: const ['NODE-SENDER'],
+          payload: {
+            'originalEnvelopeId': 'chat-19',
+            'hopSenderId': 'NODE-SENDER',
+          },
+        );
+        fakeTransport.simulateIncomingPayload(
+          endpointId: 'ep-19',
+          bytes: hopAckEnv.toBytes(),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        // 4. E2E_ACK
+        final e2eAckEnv = MessageEnvelope(
+          envelopeId: 'e2e-ack-19',
+          type: MessageEnvelope.typeE2eAck,
+          senderId: 'NODE-SENDER',
+          senderName: 'Sender Node',
+          recipientId: routing.localNodeId,
+          createdAt: DateTime.now().millisecondsSinceEpoch,
+          routeTrace: const ['NODE-SENDER'],
+          payload: {'messageId': 'msg-19', 'recipientId': routing.localNodeId},
+        );
+        fakeTransport.simulateIncomingPayload(
+          endpointId: 'ep-19',
+          bytes: e2eAckEnv.toBytes(),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        routing.dispose();
+        gossip.dispose();
+      },
+    );
+
+    test(
+      '20. End-to-end multi-step DAG block synchronization succeeds between Node A and Node B',
+      () async {
+        await establishSession();
+
+        final blockA1 = ledgerA.createBlock(
+          creatorNodeId: 'NODE-A',
+          validationProof: {'flushReason': 'manual', 'creatorNodeId': 'NODE-A'},
+        );
+        final blockA2 = ledgerA.createBlock(
+          creatorNodeId: 'NODE-A',
+          validationProof: {'flushReason': 'manual', 'creatorNodeId': 'NODE-A'},
+        );
+
+        transportB.clearSentPayloads();
+        transportB.simulateIncomingPayload(
+          endpointId: 'ep-a',
+          bytes: DagGossipCodec.encode(
+            DagInvMessage(
+              senderNodeId: 'NODE-A',
+              senderTimestamp: DateTime.now().toUtc().millisecondsSinceEpoch,
+              tipHashes: [blockA2.blockHash],
+              recentBlockHashes: [blockA1.blockHash, blockA2.blockHash],
+            ),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        final getBlocksFromB = transportB.sentPayloads
+            .map((p) => DagGossipCodec.decode(p.bytes).message)
+            .whereType<DagGetBlocksMessage>()
+            .first;
+
+        transportA.clearSentPayloads();
+        transportA.simulateIncomingPayload(
+          endpointId: 'ep-b',
+          bytes: DagGossipCodec.encode(getBlocksFromB),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        final batchFromA = transportA.sentPayloads
+            .map((p) => DagGossipCodec.decode(p.bytes).message)
+            .whereType<DagBlockBatchMessage>()
+            .first;
+
+        transportB.clearSentPayloads();
+        transportB.simulateIncomingPayload(
+          endpointId: 'ep-a',
+          bytes: DagGossipCodec.encode(batchFromA),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        expect(ledgerB.getBlock(blockA1.blockHash), isNotNull);
+        expect(ledgerB.getBlock(blockA2.blockHash), isNotNull);
+        expect(ledgerB.activeBlocksCount, equals(3));
+        expect(ledgerB.tipHashes, contains(blockA2.blockHash));
+
+        final ackFromB = transportB.sentPayloads
+            .map((p) => DagGossipCodec.decode(p.bytes).message)
+            .whereType<DagSyncAckMessage>()
+            .first;
+        expect(
+          ackFromB.acceptedBlockHashes,
+          containsAll([blockA1.blockHash, blockA2.blockHash]),
+        );
+
+        transportA.simulateIncomingPayload(
+          endpointId: 'ep-b',
+          bytes: DagGossipCodec.encode(ackFromB),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(engineA.totalSyncAckReceived, equals(1));
+      },
+    );
+  });
 }
