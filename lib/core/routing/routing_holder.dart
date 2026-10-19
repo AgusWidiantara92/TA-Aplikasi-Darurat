@@ -1,5 +1,6 @@
 import '../../features/chat/data/repositories/chat_repository.dart';
 import '../blockchain/blockdag_security_coordinator.dart';
+import '../blockchain/gossip/gossip.dart';
 import '../ids/selective_forwarding_detector.dart';
 import '../transport/transport_holder.dart';
 import '../trust/dynamic_trust_manager.dart';
@@ -17,6 +18,7 @@ class ManetRoutingHolder {
   static SelectiveForwardingDetector? _idsDetector;
   static DynamicTrustManager? _trustManager;
   static BlockdagSecurityCoordinator? _blockdagCoordinator;
+  static DagGossipSyncEngine? _gossipSyncEngine;
   static bool _enableTrustRoutingPolicy = false;
   static bool _enableBlockdagReplication = false;
 
@@ -45,6 +47,16 @@ class ManetRoutingHolder {
     _blockdagCoordinator = coordinator;
   }
 
+  static DagGossipSyncEngine? get gossipSyncEngine => _gossipSyncEngine;
+
+  static void setGossipSyncEngine(DagGossipSyncEngine? engine) {
+    _gossipSyncEngine?.dispose();
+    _gossipSyncEngine = engine;
+    if (_instance != null) {
+      _instance!.gossipSyncEngine = engine;
+    }
+  }
+
   static bool get enableTrustRoutingPolicy => _enableTrustRoutingPolicy;
 
   static void setEnableTrustRoutingPolicy(bool enable) {
@@ -55,6 +67,9 @@ class ManetRoutingHolder {
 
   static void setEnableBlockdagReplication(bool enable) {
     _enableBlockdagReplication = enable;
+    if (_gossipSyncEngine != null) {
+      _gossipSyncEngine!.isEnabled = enable;
+    }
   }
 
   static ManetRoutingEngine get instance {
@@ -67,6 +82,7 @@ class ManetRoutingHolder {
       enableHopAck: _idsDetector != null,
       trustManager: _trustManager,
       enableTrustRoutingPolicy: _enableTrustRoutingPolicy,
+      gossipSyncEngine: _gossipSyncEngine,
     );
   }
 
@@ -84,6 +100,8 @@ class ManetRoutingHolder {
     _trustManager = null;
     _blockdagCoordinator?.dispose();
     _blockdagCoordinator = null;
+    _gossipSyncEngine?.dispose();
+    _gossipSyncEngine = null;
     _enableTrustRoutingPolicy = false;
     _enableBlockdagReplication = false;
   }

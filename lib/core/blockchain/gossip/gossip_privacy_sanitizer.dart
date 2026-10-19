@@ -65,12 +65,23 @@ class GossipPrivacySanitizer {
     },
   };
 
-  /// Kunci metadata proof validasi blok yang diizinkan.
+  /// Kunci metadata proof validasi blok yang diizinkan untuk replikasi.
   static const Set<String> _allowedValidationProofKeys = {
     'creatorNodeName',
     'type',
     'network',
     'signatureType',
+    'flushReason',
+    'creatorNodeId',
+  };
+
+  /// Nilai flushReason yang sah dan digunakan oleh aplikasi/koordinator.
+  static const Set<String> _allowedFlushReasons = {
+    'emergency_suspected',
+    'batch_capacity',
+    'manual',
+    'controlled_time_flush',
+    'timeout_flush',
   };
 
   /// Pola kata kunci terlarang (sensitif/privasi) yang tidak boleh muncul dalam metadata.
@@ -103,6 +114,25 @@ class GossipPrivacySanitizer {
         );
       }
       final value = block.validationProof[key];
+
+      // Validasi khusus untuk flushReason: hanya izinkan nilai operasional yang sah
+      if (key == 'flushReason') {
+        if (value is! String || !_allowedFlushReasons.contains(value)) {
+          return PrivacyValidationResult.invalid(
+            'Nilai flushReason "$value" tidak diizinkan dalam validationProof',
+          );
+        }
+      }
+
+      // Validasi khusus untuk creatorNodeId: harus konsisten dengan identitas kreator blok
+      if (key == 'creatorNodeId') {
+        if (value is! String || value != block.creatorNodeId) {
+          return PrivacyValidationResult.invalid(
+            'creatorNodeId dalam validationProof ($value) tidak cocok dengan creatorNodeId blok (${block.creatorNodeId})',
+          );
+        }
+      }
+
       if (value is String && value.length > kMaxMetadataReasonLength) {
         return PrivacyValidationResult.invalid(
           'Nilai validationProof[$key] melebihi batas panjang maksimum',

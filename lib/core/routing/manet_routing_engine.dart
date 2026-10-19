@@ -6,6 +6,7 @@ import '../../features/chat/models/chat_message.dart';
 import '../transport/mesh_transport.dart';
 import '../ids/selective_forwarding_detector.dart';
 import '../trust/dynamic_trust_manager.dart';
+import '../blockchain/gossip/gossip.dart';
 import 'deduplication_cache.dart';
 import 'mesh_experiment_logger.dart';
 import 'message_envelope.dart';
@@ -33,6 +34,7 @@ class ManetRoutingEngine {
   final DynamicTrustManager? trustManager;
   final bool enableHopAck;
   final bool enableTrustRoutingPolicy;
+  DagGossipSyncEngine? gossipSyncEngine;
 
   StreamSubscription<TransportConnectionEvent>? _eventsSub;
   StreamSubscription<TransportPayload>? _payloadSub;
@@ -54,6 +56,7 @@ class ManetRoutingEngine {
     this.trustManager,
     this.enableHopAck = false,
     this.enableTrustRoutingPolicy = false,
+    this.gossipSyncEngine,
   }) : neighborTable = neighborTable ?? NeighborTable(),
        dedupCache = dedupCache ?? DeduplicationCache(),
        storeAndForwardQueue = storeAndForwardQueue ?? StoreAndForwardQueue() {
@@ -145,6 +148,21 @@ class ManetRoutingEngine {
   // --- Penanganan Payload Nirkabel Masuk ---
 
   void _handleIncomingPayload(TransportPayload payload) async {
+    // 0. Dispatch payload protokol gossip BlockDAG (DAG-Sync) tanpa mem-parse sebagai chat envelope
+    if (DagGossipSyncEngine.isGossipPayload(payload.bytes)) {
+      if (gossipSyncEngine != null && gossipSyncEngine!.isEnabled) {
+        try {
+          gossipSyncEngine!.handleIncomingPayload(payload);
+        } catch (e) {
+          debugPrint(
+            '[RoutingEngine] Kesalahan pada penanganan payload gossip: $e',
+          );
+        }
+      }
+      // Hentikan pemrosesan agar tidak di-parse sebagai chat MessageEnvelope atau dilaporkan korup
+      return;
+    }
+
     final envelope = MessageEnvelope.fromBytes(payload.bytes);
     if (envelope == null) {
       // Tolak data korup, tidak lengkap, atau versi tidak didukung secara aman
@@ -811,5 +829,6 @@ class ManetRoutingEngine {
     _payloadSub?.cancel();
     _incomingMessagesController.close();
     _forwardedMessagesController.close();
+    gossipSyncEngine?.dispose();
   }
 }
