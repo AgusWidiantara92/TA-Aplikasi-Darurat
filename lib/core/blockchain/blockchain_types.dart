@@ -748,7 +748,25 @@ class BlockdagPersistedState {
         'Field schemaVersion wajib ada pada BlockdagPersistedState',
       );
     }
-    final schemaVersion = (rawSchemaVersion as num).toInt();
+    if (rawSchemaVersion is! num) {
+      throw FormatException(
+        'Field schemaVersion harus bertipe numerik integer, ditemukan: ${rawSchemaVersion.runtimeType}',
+      );
+    }
+    final num numVersion = rawSchemaVersion;
+    if (numVersion is double) {
+      if (numVersion.isNaN || numVersion.isInfinite) {
+        throw const FormatException(
+          'Field schemaVersion tidak boleh bernilai NaN atau Infinity',
+        );
+      }
+      if (numVersion != numVersion.truncateToDouble()) {
+        throw FormatException(
+          'Field schemaVersion tidak boleh bernilai pecahan, ditemukan: $numVersion',
+        );
+      }
+    }
+    final schemaVersion = numVersion.toInt();
     if (schemaVersion <= 0) {
       throw FormatException(
         'Field schemaVersion harus bernilai bilangan bulat positif, ditemukan: $schemaVersion',

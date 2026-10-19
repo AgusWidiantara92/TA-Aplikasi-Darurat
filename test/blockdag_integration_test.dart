@@ -1475,4 +1475,317 @@ void main() {
       },
     );
   });
+
+  group('STAGE 5E.3.3 — Strict Schema Version Validation', () {
+    test(
+      '29. BlockdagPersistedState.fromMap menolak schemaVersion pecahan, nol, negatif, string, boolean, dan non-finite',
+      () {
+        Map<String, dynamic> createBaseMap(dynamic version) => {
+          if (version != 'OMIT') 'schemaVersion': version,
+          'blocks': [],
+          'checkpoints': [],
+          'tipHashes': [],
+          'processedBlockHashes': [],
+          'processedEventIds': [],
+          'pendingEvents': [],
+          'savedAt': DateTime.now().toUtc().toIso8601String(),
+        };
+
+        // 1. Pecahan ditolak
+        expect(
+          () => BlockdagPersistedState.fromMap(createBaseMap(1.5)),
+          throwsA(
+            isA<FormatException>().having(
+              (e) => e.message,
+              'message',
+              contains('pecahan'),
+            ),
+          ),
+        );
+        expect(
+          () => BlockdagPersistedState.fromMap(createBaseMap(0.1)),
+          throwsA(isA<FormatException>()),
+        );
+
+        // 2. Nol dan negatif ditolak
+        expect(
+          () => BlockdagPersistedState.fromMap(createBaseMap(0)),
+          throwsA(
+            isA<FormatException>().having(
+              (e) => e.message,
+              'message',
+              contains('positif'),
+            ),
+          ),
+        );
+        expect(
+          () => BlockdagPersistedState.fromMap(createBaseMap(-1)),
+          throwsA(isA<FormatException>()),
+        );
+        expect(
+          () => BlockdagPersistedState.fromMap(createBaseMap(-1.5)),
+          throwsA(isA<FormatException>()),
+        );
+
+        // 3. Field hilang atau null ditolak
+        expect(
+          () => BlockdagPersistedState.fromMap(createBaseMap(null)),
+          throwsA(
+            isA<FormatException>().having(
+              (e) => e.message,
+              'message',
+              contains('wajib ada'),
+            ),
+          ),
+        );
+        expect(
+          () => BlockdagPersistedState.fromMap(createBaseMap('OMIT')),
+          throwsA(isA<FormatException>()),
+        );
+
+        // 4. String dan boolean ditolak
+        expect(
+          () => BlockdagPersistedState.fromMap(createBaseMap('1')),
+          throwsA(
+            isA<FormatException>().having(
+              (e) => e.message,
+              'message',
+              contains('numerik integer'),
+            ),
+          ),
+        );
+        expect(
+          () => BlockdagPersistedState.fromMap(createBaseMap(true)),
+          throwsA(isA<FormatException>()),
+        );
+
+        // 5. Non-finite ditolak
+        expect(
+          () => BlockdagPersistedState.fromMap(createBaseMap(double.nan)),
+          throwsA(
+            isA<FormatException>().having(
+              (e) => e.message,
+              'message',
+              contains('NaN atau Infinity'),
+            ),
+          ),
+        );
+        expect(
+          () => BlockdagPersistedState.fromMap(createBaseMap(double.infinity)),
+          throwsA(isA<FormatException>()),
+        );
+
+        // 6. Versi positif integer valid 1 diterima
+        final stateV1 = BlockdagPersistedState.fromMap(createBaseMap(1));
+        expect(stateV1.schemaVersion, equals(1));
+
+        // 7. Versi integer bulat lebih tinggi 2 diterima oleh parser (nantinya ditolak oleh repository)
+        final stateV2 = BlockdagPersistedState.fromMap(createBaseMap(2));
+        expect(stateV2.schemaVersion, equals(2));
+      },
+    );
+
+    test(
+      '30. LocalBlockdagRepository.loadResult menolak schemaVersion pecahan (1.5) sebagai corruptedData',
+      () async {
+        SharedPreferences.setMockInitialValues({
+          LocalBlockdagRepository.keySchemaVersion: 1,
+          LocalBlockdagRepository.keyState: jsonEncode({
+            'schemaVersion': 1.5,
+            'blocks': [],
+            'checkpoints': [],
+            'tipHashes': [],
+            'processedBlockHashes': [],
+            'processedEventIds': [],
+            'pendingEvents': [],
+            'savedAt': DateTime.now().toUtc().toIso8601String(),
+          }),
+        });
+
+        final repo = LocalBlockdagRepository();
+        final loadRes = await repo.loadResult();
+        expect(loadRes.status, equals(BlockdagLoadStatus.corruptedData));
+        expect(loadRes.isCorrupted, isTrue);
+        expect(loadRes.errorMessage, contains('pecahan'));
+        expect(repo.lastLoadCorrupted, isTrue);
+      },
+    );
+
+    test(
+      '31. LocalBlockdagRepository.loadResult menolak schemaVersion bertipe string dan boolean',
+      () async {
+        // String
+        SharedPreferences.setMockInitialValues({
+          LocalBlockdagRepository.keyState: jsonEncode({
+            'schemaVersion': '1',
+            'blocks': [],
+            'checkpoints': [],
+            'tipHashes': [],
+            'processedBlockHashes': [],
+            'processedEventIds': [],
+            'pendingEvents': [],
+            'savedAt': DateTime.now().toUtc().toIso8601String(),
+          }),
+        });
+
+        final repo1 = LocalBlockdagRepository();
+        final loadRes1 = await repo1.loadResult();
+        expect(loadRes1.status, equals(BlockdagLoadStatus.corruptedData));
+        expect(loadRes1.errorMessage, contains('numerik'));
+
+        // Boolean
+        SharedPreferences.setMockInitialValues({
+          LocalBlockdagRepository.keyState: jsonEncode({
+            'schemaVersion': false,
+            'blocks': [],
+            'checkpoints': [],
+            'tipHashes': [],
+            'processedBlockHashes': [],
+            'processedEventIds': [],
+            'pendingEvents': [],
+            'savedAt': DateTime.now().toUtc().toIso8601String(),
+          }),
+        });
+
+        final repo2 = LocalBlockdagRepository();
+        final loadRes2 = await repo2.loadResult();
+        expect(loadRes2.status, equals(BlockdagLoadStatus.corruptedData));
+        expect(loadRes2.errorMessage, contains('numerik'));
+      },
+    );
+
+    test(
+      '32. Versi skema bulat lebih tinggi (versi 2 dan 99) menghasilkan unsupportedVersion tanpa fallback diam-diam',
+      () async {
+        for (final unsupportedVer in [2, 99]) {
+          SharedPreferences.setMockInitialValues({
+            LocalBlockdagRepository.keySchemaVersion: unsupportedVer,
+            LocalBlockdagRepository.keyState: jsonEncode({
+              'schemaVersion': unsupportedVer,
+              'blocks': [],
+              'checkpoints': [],
+              'tipHashes': ['tip-future-$unsupportedVer'],
+              'processedBlockHashes': [],
+              'processedEventIds': [],
+              'pendingEvents': [],
+              'savedAt': DateTime.now().toUtc().toIso8601String(),
+            }),
+          });
+
+          final repo = LocalBlockdagRepository();
+          final loadRes = await repo.loadResult();
+          expect(loadRes.status, equals(BlockdagLoadStatus.unsupportedVersion));
+          expect(loadRes.isUnsupportedVersion, isTrue);
+          expect(loadRes.detectedSchemaVersion, equals(unsupportedVer));
+          expect(
+            repo.lastLoadCorrupted,
+            isFalse,
+          ); // Bukan korupsi, melainkan versi masa depan
+        }
+      },
+    );
+
+    test(
+      '33. State dengan versi tidak didukung tidak dihapus atau ditimpa oleh Genesis baru',
+      () async {
+        final futurePayload = jsonEncode({
+          'schemaVersion': 2,
+          'blocks': [],
+          'checkpoints': [],
+          'tipHashes': ['tip-preserved-state'],
+          'processedBlockHashes': [],
+          'processedEventIds': [],
+          'pendingEvents': [],
+          'savedAt': DateTime.now().toUtc().toIso8601String(),
+        });
+
+        SharedPreferences.setMockInitialValues({
+          LocalBlockdagRepository.keySchemaVersion: 2,
+          LocalBlockdagRepository.keyState: futurePayload,
+        });
+
+        final repo = LocalBlockdagRepository();
+        final ledger = LightweightBlockdagLedger();
+        final coordinator = BlockdagSecurityCoordinator(
+          localNodeId: 'NODE-A',
+          ledger: ledger,
+          repository: repo,
+        );
+
+        final status = await coordinator.initialize();
+        expect(status, equals(BlockdagInitStatus.unsupportedVersionHalted));
+        expect(coordinator.isInitialized, isFalse);
+
+        // Verifikasi pada storage disk nyata: payload tidak boleh terhapus atau berubah
+        final prefs = await SharedPreferences.getInstance();
+        expect(
+          prefs.getString(LocalBlockdagRepository.keyState),
+          equals(futurePayload),
+        );
+        expect(
+          prefs.getInt(LocalBlockdagRepository.keySchemaVersion),
+          equals(2),
+        );
+      },
+    );
+
+    test(
+      '34. Pemulihan state valid yang sudah tersimpan (versi 1) tetap berfungsi sempurna',
+      () async {
+        final sharedPrefs = await SharedPreferences.getInstance();
+        final repo = LocalBlockdagRepository(preferences: sharedPrefs);
+        final ledger1 = LightweightBlockdagLedger();
+        final coord1 = BlockdagSecurityCoordinator(
+          localNodeId: 'NODE-A',
+          ledger: ledger1,
+          repository: repo,
+          config: const BlockdagBatchConfig(maxBatchSize: 1),
+        );
+        await coord1.initialize();
+
+        await coord1.processIdsDetectionEvent(
+          IdsDetectionEvent(
+            eventId: 'v1-persisted-evt',
+            runId: 'RUN-V1',
+            observerNodeId: 'NODE-A',
+            targetNodeId: 'NODE-B',
+            status: NodeDetectionStatus.suspected,
+            observedDropRate: 0.6,
+            totalExpected: 5,
+            totalClaimed: 2,
+            totalUnconfirmed: 3,
+            totalLinkFailures: 0,
+            totalProtocolDrops: 0,
+            reason: 'V1 validation test',
+            timestamp: DateTime.now().toUtc(),
+            monotonicMicros: 999,
+          ),
+        );
+
+        // Verifikasi bahwa state tersimpan dengan schemaVersion: 1
+        final rawJson = sharedPrefs.getString(LocalBlockdagRepository.keyState);
+        expect(rawJson, isNotNull);
+        final decoded = jsonDecode(rawJson!) as Map<String, dynamic>;
+        expect(decoded['schemaVersion'], equals(1));
+        expect(
+          sharedPrefs.getInt(LocalBlockdagRepository.keySchemaVersion),
+          equals(1),
+        );
+
+        // Pulihkan pada instance kedua
+        final ledger2 = LightweightBlockdagLedger();
+        final coord2 = BlockdagSecurityCoordinator(
+          localNodeId: 'NODE-A',
+          ledger: ledger2,
+          repository: repo,
+        );
+
+        final initStatus = await coord2.initialize();
+        expect(initStatus, equals(BlockdagInitStatus.restoredFromStorage));
+        expect(coord2.isInitialized, isTrue);
+        expect(ledger2.activeBlocksCount, equals(2));
+        expect(ledger2.processedEventIds, contains('v1-persisted-evt'));
+      },
+    );
+  });
 }

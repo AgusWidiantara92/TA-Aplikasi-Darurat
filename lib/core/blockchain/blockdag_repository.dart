@@ -176,7 +176,30 @@ class LocalBlockdagRepository implements BlockdagRepository {
       );
     }
 
-    final versionInState = (rawVersionInState as num).toInt();
+    if (rawVersionInState is! num) {
+      _lastLoadCorrupted = true;
+      return BlockdagLoadResult.corruptedData(
+        'Field schemaVersion harus bertipe numerik integer, ditemukan: ${rawVersionInState.runtimeType}',
+      );
+    }
+
+    final num numVersionInState = rawVersionInState;
+    if (numVersionInState is double) {
+      if (numVersionInState.isNaN || numVersionInState.isInfinite) {
+        _lastLoadCorrupted = true;
+        return BlockdagLoadResult.corruptedData(
+          'Field schemaVersion tidak boleh bernilai NaN atau Infinity',
+        );
+      }
+      if (numVersionInState != numVersionInState.truncateToDouble()) {
+        _lastLoadCorrupted = true;
+        return BlockdagLoadResult.corruptedData(
+          'Field schemaVersion tidak boleh bernilai pecahan, ditemukan: $numVersionInState',
+        );
+      }
+    }
+
+    final versionInState = numVersionInState.toInt();
     if (versionInState <= 0) {
       _lastLoadCorrupted = true;
       return BlockdagLoadResult.corruptedData(
@@ -184,7 +207,16 @@ class LocalBlockdagRepository implements BlockdagRepository {
       );
     }
 
-    final versionInPrefs = prefs.getInt(keySchemaVersion);
+    int? versionInPrefs;
+    try {
+      versionInPrefs = prefs.getInt(keySchemaVersion);
+    } catch (_) {
+      _lastLoadCorrupted = true;
+      return BlockdagLoadResult.corruptedData(
+        'Nilai keySchemaVersion pada SharedPreferences korup atau bukan integer',
+      );
+    }
+
     if (versionInPrefs != null && versionInPrefs != versionInState) {
       _lastLoadCorrupted = true;
       return BlockdagLoadResult.corruptedData(
