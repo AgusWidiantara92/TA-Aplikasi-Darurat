@@ -7,6 +7,7 @@ import 'package:siagamesh_app/core/transport/fake_mesh_transport.dart';
 import 'package:siagamesh_app/core/transport/mesh_transport.dart';
 import 'package:siagamesh_app/core/transport/transport_holder.dart';
 import 'package:siagamesh_app/features/chat/data/repositories/chat_repository.dart';
+import 'package:siagamesh_app/features/chat/models/chat_message.dart';
 
 void main() {
   late FakeMeshTransport fakeTransport;
@@ -46,14 +47,15 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Jaringan Komunikasi Darurat Offline'), findsOneWidget);
-    expect(find.text('Posko Medis Darurat'), findsOneWidget);
+    expect(find.text('Belum ada pesan'), findsOneWidget);
+    expect(find.text('Buat Pesan Baru'), findsOneWidget);
 
-    // 3. Navigasi ke Layar Detail Percakapan (Klik item percakapan)
-    await tester.tap(find.text('Posko Medis Darurat'));
+    // 3. Navigasi ke Layar Detail Percakapan (Klik Buat Pesan Baru)
+    await tester.tap(find.text('Buat Pesan Baru'));
     await tester.pumpAndSettle();
 
     expect(find.text('Detail Percakapan'), findsOneWidget);
-    expect(find.text('Data Telemetri Lokasi'), findsOneWidget);
+    expect(find.text('Siaran Darurat Lokal'), findsOneWidget);
 
     // Kembali ke Layar Daftar Pesan
     await tester.tap(find.byIcon(Icons.arrow_back_ios_new));
@@ -141,53 +143,75 @@ void main() {
   testWidgets('Verifikasi filter dan pencarian di Daftar Pesan', (
     WidgetTester tester,
   ) async {
+    final repo = ChatRepositoryHolder.instance;
+    final conv1 = await repo.getOrCreateConversationForNode(
+      nodeId: 'node-alpha-001',
+      nodeName: 'Posko Alpha',
+      isEmergency: true,
+      isConnected: true,
+    );
+    final conv2 = await repo.getOrCreateConversationForNode(
+      nodeId: 'node-beta-002',
+      nodeName: 'Relawan Beta',
+      isEmergency: false,
+      isConnected: false,
+    );
+    await repo.saveMessage(
+      conv1.id,
+      const ChatMessage(
+        id: 'msg-1',
+        senderName: 'Posko Alpha',
+        text: 'Ambulans siap siaga di lokasi.',
+        time: '10:00',
+        isMe: false,
+        isEmergency: true,
+      ),
+    );
+    await repo.saveMessage(
+      conv2.id,
+      const ChatMessage(
+        id: 'msg-2',
+        senderName: 'Relawan Beta',
+        text: 'Logistik sudah didistribusikan.',
+        time: '10:05',
+        isMe: false,
+      ),
+    );
+
     await tester.pumpWidget(SiagaMeshApp(transport: fakeTransport));
 
     // Buka Tab Pesan
     await tester.tap(find.text('Pesan'));
     await tester.pumpAndSettle();
 
-    // Filter Semua (4): cek item awal
-    expect(find.text('Posko Medis Darurat'), findsOneWidget);
-    expect(find.text('Tim SAR Wilayah II'), findsOneWidget);
-    expect(find.text('Ahmed Fauzi'), findsOneWidget);
+    // Filter Semua: cek item
+    expect(find.text('Posko Alpha'), findsOneWidget);
+    expect(find.text('Relawan Beta'), findsOneWidget);
 
-    // Drag list view ke atas untuk melihat item ke-4
-    await tester.drag(find.byType(ListView), const Offset(0, -300));
-    await tester.pumpAndSettle();
-    expect(find.text('Relawan Dapur Umum'), findsOneWidget);
-
-    // Kembalikan scroll ke atas
-    await tester.drag(find.byType(ListView), const Offset(0, 300));
+    // Filter Pesan Darurat
+    await tester.tap(find.text('Pesan Darurat'));
     await tester.pumpAndSettle();
 
-    // Filter Pesan Darurat (1)
-    await tester.tap(find.text('Pesan Darurat (1)'));
-    await tester.pumpAndSettle();
+    expect(find.text('Posko Alpha'), findsOneWidget);
+    expect(find.text('Relawan Beta'), findsNothing);
 
-    expect(find.text('Posko Medis Darurat'), findsOneWidget);
-    expect(find.text('Tim SAR Wilayah II'), findsNothing);
-    expect(find.text('Ahmed Fauzi'), findsNothing);
-
-    // Filter Node Terhubung (3 node langsung)
+    // Filter Node Terhubung
     await tester.tap(find.text('Node Terhubung'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Posko Medis Darurat'), findsOneWidget);
-    expect(find.text('Tim SAR Wilayah II'), findsOneWidget);
-    expect(find.text('Ahmed Fauzi'), findsOneWidget);
-    expect(find.text('Relawan Dapur Umum'), findsNothing);
+    expect(find.text('Posko Alpha'), findsOneWidget);
+    expect(find.text('Relawan Beta'), findsNothing);
 
-    // Kembalikan ke Semua (4)
-    await tester.tap(find.text('Semua (4)'));
+    // Kembalikan ke Semua
+    await tester.tap(find.text('Semua'));
     await tester.pumpAndSettle();
 
     // Uji Pencarian
-    await tester.enterText(find.byType(TextField), 'Ahmed');
+    await tester.enterText(find.byType(TextField), 'Alpha');
     await tester.pumpAndSettle();
 
-    expect(find.text('Ahmed Fauzi'), findsOneWidget);
-    expect(find.text('Posko Medis Darurat'), findsNothing);
+    expect(find.text('Posko Alpha'), findsOneWidget);
+    expect(find.text('Relawan Beta'), findsNothing);
 
     // Pencarian tidak ditemukan
     await tester.enterText(find.byType(TextField), 'xyz-tidak-ada');
@@ -199,12 +223,18 @@ void main() {
   testWidgets(
     'Verifikasi pengiriman pesan dan tombol respons cepat di Detail Percakapan',
     (WidgetTester tester) async {
+      final repo = ChatRepositoryHolder.instance;
+      await repo.getOrCreateConversationForNode(
+        nodeId: 'node-sar-unit',
+        nodeName: 'Posko SAR Lapangan',
+      );
+
       await tester.pumpWidget(SiagaMeshApp(transport: fakeTransport));
 
-      // Buka Pesan -> Posko Medis Darurat
+      // Buka Pesan -> Posko SAR Lapangan
       await tester.tap(find.text('Pesan'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Posko Medis Darurat'));
+      await tester.tap(find.text('Posko SAR Lapangan'));
       await tester.pumpAndSettle();
 
       // Ketik pesan manual
@@ -242,10 +272,8 @@ void main() {
       await tester.tap(find.text('Pesan'));
       await tester.pumpAndSettle();
 
-      // Drag list view ke atas untuk memunculkan tombol Buat Pesan Baru
-      await tester.drag(find.byType(ListView), const Offset(0, -350));
-      await tester.pumpAndSettle();
-
+      // Pada empty state, tombol Buat Pesan Baru langsung terlihat
+      expect(find.text('Belum ada pesan'), findsOneWidget);
       await tester.tap(find.text('Buat Pesan Baru'));
       await tester.pumpAndSettle();
 
@@ -263,71 +291,70 @@ void main() {
     },
   );
 
-  testWidgets(
-    'Verifikasi interaksi pada Layar Perangkat dengan peer fisik riil',
-    (WidgetTester tester) async {
-      // Simulasikan 2 peer fisik
-      fakeTransport.simulatePeerDiscovered(
-        DiscoveredPeer(
-          endpointId: 'node-sar-1',
-          endpointName: 'Posko Relawan SAR',
-          serviceId: 'com.siagamesh.emergency.mesh',
-          discoveredAt: DateTime.now(),
-          status: PeerConnectionStatus.connected,
-        ),
-      );
-      fakeTransport.simulatePeerDiscovered(
-        DiscoveredPeer(
-          endpointId: 'node-warga-2',
-          endpointName: 'Warga Blok B',
-          serviceId: 'com.siagamesh.emergency.mesh',
-          discoveredAt: DateTime.now(),
-          status: PeerConnectionStatus.disconnected,
-        ),
-      );
+  testWidgets('Verifikasi interaksi pada Layar Perangkat dengan peer fisik riil', (
+    WidgetTester tester,
+  ) async {
+    // Simulasikan 2 peer fisik
+    fakeTransport.simulatePeerDiscovered(
+      DiscoveredPeer(
+        endpointId: 'node-sar-1',
+        endpointName: 'Posko Relawan SAR',
+        serviceId: 'com.siagamesh.emergency.mesh',
+        discoveredAt: DateTime.now(),
+        status: PeerConnectionStatus.connected,
+      ),
+    );
+    fakeTransport.simulatePeerDiscovered(
+      DiscoveredPeer(
+        endpointId: 'node-warga-2',
+        endpointName: 'Warga Blok B',
+        serviceId: 'com.siagamesh.emergency.mesh',
+        discoveredAt: DateTime.now(),
+        status: PeerConnectionStatus.disconnected,
+      ),
+    );
 
-      await tester.pumpWidget(SiagaMeshApp(transport: fakeTransport));
+    await tester.pumpWidget(SiagaMeshApp(transport: fakeTransport));
 
-      await tester.tap(find.text('Perangkat'));
-      await tester.pumpAndSettle();
+    await tester.tap(find.text('Perangkat'));
+    await tester.pumpAndSettle();
 
-      // Verifikasi radar sinyal peer-to-peer
-      expect(find.text('Radar Sinyal Peer-to-Peer'), findsOneWidget);
+    // Verifikasi radar sinyal peer-to-peer
+    expect(find.text('Radar Sinyal Peer-to-Peer'), findsOneWidget);
 
-      // Drag ke atas untuk melihat daftar peer
-      await tester.drag(find.byType(ListView), const Offset(0, -300));
-      await tester.pumpAndSettle();
+    // Drag ke atas untuk melihat daftar peer
+    await tester.drag(find.byType(ListView), const Offset(0, -300));
+    await tester.pumpAndSettle();
 
-      expect(find.text('Daftar Peer Terdeteksi (2)'), findsOneWidget);
+    expect(find.text('Daftar Peer Terdeteksi (2)'), findsOneWidget);
 
-      // Klik tombol Kirim Pesan pada peer terhubung
-      expect(find.text('Kirim Pesan'), findsOneWidget);
-      await tester.tap(find.text('Kirim Pesan'));
-      await tester.pumpAndSettle();
+    // Klik tombol Kirim Pesan pada peer terhubung
+    expect(find.text('Kirim Pesan'), findsOneWidget);
+    await tester.tap(find.text('Kirim Pesan'));
+    await tester.pumpAndSettle();
 
-      expect(find.text('Detail Percakapan'), findsOneWidget);
-      expect(find.text('Posko Relawan SAR'), findsOneWidget);
+    expect(find.text('Detail Percakapan'), findsOneWidget);
+    expect(find.text('Posko Relawan SAR'), findsOneWidget);
 
-      // Kembali ke Layar Perangkat
-      await tester.tap(find.byIcon(Icons.arrow_back_ios_new));
-      await tester.pumpAndSettle();
+    // Kembali ke Layar Perangkat
+    await tester.tap(find.byIcon(Icons.arrow_back_ios_new));
+    await tester.pumpAndSettle();
 
-      // Drag sedikit ke atas agar tombol Hubungkan terlihat bebas dari bottom nav
-      await tester.drag(find.byType(ListView), const Offset(0, -200));
-      await tester.pumpAndSettle();
+    // Drag sedikit ke atas agar tombol Hubungkan terlihat bebas dari bottom nav
+    await tester.drag(find.byType(ListView), const Offset(0, -200));
+    await tester.pumpAndSettle();
 
-      // Peer kedua (Warga Blok B) yang belum terhubung memiliki tombol Hubungkan
-      expect(find.text('Hubungkan'), findsOneWidget);
-      await tester.tap(find.text('Hubungkan'));
-      await tester.pumpAndSettle();
+    // Peer kedua (Warga Blok B) yang belum terhubung memiliki tombol Hubungkan
+    expect(find.text('Hubungkan'), findsOneWidget);
+    await tester.tap(find.text('Hubungkan'));
+    await tester.pumpAndSettle();
 
-      // Memverifikasi request koneksi riil pada fake transport
-      expect(
-        fakeTransport.currentPeers
-            .firstWhere((p) => p.endpointId == 'node-warga-2')
-            .status,
-        PeerConnectionStatus.connecting,
-      );
-    },
-  );
+    // Memverifikasi request koneksi riil pada fake transport
+    expect(
+      fakeTransport.currentPeers
+          .firstWhere((p) => p.endpointId == 'node-warga-2')
+          .status,
+      PeerConnectionStatus.connecting,
+    );
+  });
 }

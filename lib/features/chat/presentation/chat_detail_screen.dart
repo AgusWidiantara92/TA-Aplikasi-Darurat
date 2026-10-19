@@ -72,14 +72,6 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
 
     if (widget.initialMessages != null) {
       _messages = List<ChatMessage>.from(widget.initialMessages!);
-    } else if (widget.conversationId == 'conv-1' ||
-        (widget.conversationId == null &&
-            (widget.nodeId.contains('MED-0041') ||
-                widget.conversationTitle.contains('Posko Medis')))) {
-      _messages = List<ChatMessage>.from(
-        LocalChatRepository.defaultConv1Messages,
-      );
-      _loadMessagesFromRepo();
     } else {
       _messages = [];
       _loadMessagesFromRepo();
@@ -239,10 +231,6 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     if (widget.nodeId.contains('ALL-NODES') ||
         widget.conversationTitle.contains('Siaran')) {
       return 'broadcast-all';
-    }
-    if (widget.nodeId.contains('MED-0041') ||
-        widget.conversationTitle.contains('Posko Medis')) {
-      return 'conv-1';
     }
     return null;
   }

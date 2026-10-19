@@ -103,7 +103,7 @@ class RadarWidget extends StatelessWidget {
                 style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
               ),
               Text(
-                'Latensi: Belum diukur',
+                'Nearby Connections',
                 style: TextStyle(
                   fontSize: 11,
                   fontWeight: FontWeight.bold,

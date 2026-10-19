@@ -17,24 +17,29 @@ void main() {
         final prefs = await SharedPreferences.getInstance();
         final repository = LocalChatRepository(preferences: prefs);
 
-        // Pastikan percakapan awal termuat
+        // Pastikan repositori awal kosong tanpa dummy data
         final initialConversations = await repository.getConversations();
-        expect(initialConversations.isNotEmpty, isTrue);
-        expect(initialConversations.any((c) => c.id == 'conv-1'), isTrue);
+        expect(initialConversations.isEmpty, isTrue);
 
-        // Simpan pesan baru ke conv-1
+        // Buat percakapan baru untuk node dan simpan pesan
+        final conv = await repository.getOrCreateConversationForNode(
+          nodeId: 'node-test-1',
+          nodeName: 'Posko Uji Coba',
+        );
+        expect(conv.id, equals('conv-node-node-test-1'));
+
         const testMessage = ChatMessage(
           id: 'msg-test-001',
           senderName: 'Anda',
           text: 'Laporan kondisi lapangan aman.',
           time: '11:15',
           isMe: true,
-          statusText: 'Tersimpan Lokal (Simulasi)',
+          statusText: 'Tersimpan Lokal',
         );
-        await repository.saveMessage('conv-1', testMessage);
+        await repository.saveMessage(conv.id, testMessage);
 
         // Muat kembali pesan dari repository
-        final messages = await repository.getMessages('conv-1');
+        final messages = await repository.getMessages(conv.id);
         expect(messages.any((m) => m.id == 'msg-test-001'), isTrue);
         expect(
           messages.firstWhere((m) => m.id == 'msg-test-001').text,
@@ -43,9 +48,11 @@ void main() {
 
         // Pastikan ringkasan percakapan diperbarui
         final updatedConversations = await repository.getConversations();
-        final conv1 = updatedConversations.firstWhere((c) => c.id == 'conv-1');
-        expect(conv1.lastMessage, 'Laporan kondisi lapangan aman.');
-        expect(conv1.time, '11:15');
+        final updatedConv = updatedConversations.firstWhere(
+          (c) => c.id == conv.id,
+        );
+        expect(updatedConv.lastMessage, 'Laporan kondisi lapangan aman.');
+        expect(updatedConv.time, '11:15');
       },
     );
 
@@ -56,19 +63,23 @@ void main() {
 
         // Instance pertama repository
         final repoInstance1 = LocalChatRepository(preferences: prefs);
+        final conv = await repoInstance1.getOrCreateConversationForNode(
+          nodeId: 'node-test-persist',
+          nodeName: 'Posko Persist',
+        );
         const testMessage = ChatMessage(
           id: 'msg-persistent-999',
           senderName: 'Anda',
           text: 'Pesan pengujian persistensi antar-restart.',
           time: '12:00',
           isMe: true,
-          statusText: 'Tersimpan Lokal (Simulasi)',
+          statusText: 'Tersimpan Lokal',
         );
-        await repoInstance1.saveMessage('conv-1', testMessage);
+        await repoInstance1.saveMessage(conv.id, testMessage);
 
         // Buat instance kedua (simulasi buka ulang aplikasi) menggunakan SharedPreferences yang sama
         final repoInstance2 = LocalChatRepository(preferences: prefs);
-        final messagesAfterRestart = await repoInstance2.getMessages('conv-1');
+        final messagesAfterRestart = await repoInstance2.getMessages(conv.id);
 
         expect(
           messagesAfterRestart.any((m) => m.id == 'msg-persistent-999'),
@@ -184,21 +195,20 @@ void main() {
         SharedPreferences.setMockInitialValues({
           LocalChatRepository.keyConversations:
               '{{INVALID_JSON_CORRUPTED_STRING%%',
-          '${LocalChatRepository.keyMessagesPrefix}conv-1':
+          '${LocalChatRepository.keyMessagesPrefix}test-corrupt':
               '[[CORRUPTED_MESSAGES_ARRAY??',
         });
 
         final prefs = await SharedPreferences.getInstance();
         final repository = LocalChatRepository(preferences: prefs);
 
-        // Pengambilan percakapan tidak boleh crash, harus fallback ke seed bawaan
+        // Pengambilan percakapan tidak boleh crash, mengembalikan list kosong
         final conversations = await repository.getConversations();
-        expect(conversations.isNotEmpty, isTrue);
-        expect(conversations.any((c) => c.id == 'conv-1'), isTrue);
+        expect(conversations.isEmpty, isTrue);
 
-        // Pengambilan pesan conv-1 tidak boleh crash, harus fallback ke pesan awal conv-1
-        final messages = await repository.getMessages('conv-1');
-        expect(messages.isNotEmpty, isTrue);
+        // Pengambilan pesan tidak boleh crash, mengembalikan list kosong
+        final messages = await repository.getMessages('test-corrupt');
+        expect(messages.isEmpty, isTrue);
 
         // Pengambilan ID percakapan yang tidak ada harus mengembalikan list kosong dengan aman
         final emptyMessages = await repository.getMessages('non-existent-conv');

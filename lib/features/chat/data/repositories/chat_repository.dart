@@ -46,112 +46,12 @@ class LocalChatRepository implements ChatRepository {
 
   LocalChatRepository({SharedPreferences? preferences})
     : _injectedPreferences = preferences {
-    _conversationsCache = List<ChatConversation>.from(defaultConversations);
+    _conversationsCache = [];
     _initFromDisk();
   }
 
-  // --- Seed Data Bawaan ---
-
-  static final List<ChatConversation> defaultConversations = [
-    const ChatConversation(
-      id: 'conv-1',
-      title: 'Posko Medis Darurat',
-      nodeId: 'Node ID: #MED-0041',
-      peerNodeId: 'node-med-0041',
-      lastMessage: 'Ambulans darurat sedang menuju titik koordinat...',
-      time: '10:33',
-      unreadCount: 1,
-      badgeText: 'DARURAT',
-      badgeBgColor: AppColors.emergencyRed,
-      badgeTextColor: Colors.white,
-      statusLabel: 'Darurat',
-      isEmergency: true,
-      isConnectedNode: true,
-    ),
-    const ChatConversation(
-      id: 'conv-2',
-      title: 'Tim SAR Wilayah II',
-      nodeId: 'Node ID: #SAR-0012',
-      peerNodeId: 'node-sar-0012',
-      lastMessage: 'Konfirmasi: Rute evakuasi jembatan timur aman dilalui...',
-      time: '10:14',
-      badgeText: 'Terverifikasi',
-      badgeBgColor: AppColors.accentPillBg,
-      badgeTextColor: AppColors.accentBlue,
-      statusLabel: 'Dibaca',
-      isConnectedNode: true,
-    ),
-    const ChatConversation(
-      id: 'conv-3',
-      title: 'Ahmed Fauzi',
-      nodeId: 'Jarak: 35 meter',
-      peerNodeId: 'node-ahmed-fauzi',
-      lastMessage: 'Kami memiliki cadangan air bersih di blok C...',
-      time: '09:48',
-      badgeText: 'Dekat Anda',
-      badgeBgColor: AppColors.surfaceSubtle,
-      badgeTextColor: AppColors.primaryNavy,
-      statusLabel: 'Terkirim',
-      isConnectedNode: true,
-    ),
-    const ChatConversation(
-      id: 'conv-4',
-      title: 'Relawan Dapur Umum',
-      nodeId: 'Saluran Komunitas',
-      lastMessage: 'Distribusi logistik tahap pertama dimulai pukul 11:00...',
-      time: '08:15',
-      badgeText: 'Pengumuman',
-      badgeBgColor: AppColors.surfaceSubtle,
-      badgeTextColor: AppColors.textSecondary,
-      statusLabel: 'Selesai',
-      isConnectedNode: false,
-    ),
-  ];
-
-  static final List<ChatMessage> defaultConv1Messages = [
-    const ChatMessage(
-      id: 'm1',
-      senderName: 'Posko SAR Unit 1',
-      text:
-          'Halo! Kami mendeteksi sinyal SOS dari perangkat Anda di radius 350 meter. Apakah ada korban yang memerlukan pertolongan darurat?',
-      time: '10:30',
-      isMe: false,
-      relayInfo: 'Ditransmisi melalui multi-hop relay #01',
-    ),
-    const ChatMessage(
-      id: 'm2',
-      senderName: 'Anda',
-      text:
-          'Benar, ada 2 orang lansia dan 1 balita membutuhkan evakuasi perahu karet karena air sudah mencapai 1.5 meter.',
-      time: '10:32',
-      isMe: true,
-      statusText: 'Terkirim • E2E Terkonfirmasi',
-    ),
-    const ChatMessage(
-      id: 'm3',
-      senderName: 'Anda',
-      text: 'Data Telemetri Koordinat Lokasi Darurat',
-      time: '10:32',
-      isMe: true,
-      telemetryData: TelemetryData(
-        locationName: 'SDN 01 Pagi (Lantai 2)',
-        latitude: -6.2088,
-        longitude: 106.8456,
-        accuracy: 'Akurasi GPS: Tidak diukur',
-        priority: 'PRIORITAS TINGGI',
-        validationInfo: 'Verifikasi: Header HMAC Valid',
-      ),
-    ),
-    const ChatMessage(
-      id: 'm4',
-      senderName: 'Posko SAR Unit 1',
-      text:
-          'Informasi diterima. Perahu evakuasi No. 04 sedang meluncur ke titik SDN 01. Harap tetap di titik tertinggi.',
-      time: '10:33',
-      isMe: false,
-      relayInfo: 'Terverifikasi Konsensus SAR Lapangan',
-    ),
-  ];
+  // --- Seed Data Bawaan (Kosong secara default, hanya pesan riil yang disimpan) ---
+  static const List<ChatConversation> defaultConversations = [];
 
   Future<SharedPreferences?> _getPrefs() async {
     if (_injectedPreferences != null) {
@@ -166,39 +66,34 @@ class LocalChatRepository implements ChatRepository {
 
   Future<void> _initFromDisk() async {
     final prefs = await _getPrefs();
-    if (prefs == null) return;
+    if (prefs == null) {
+      _isLoadedFromDisk = true;
+      return;
+    }
 
     try {
       final rawConvJson = prefs.getString(keyConversations);
       if (rawConvJson != null && rawConvJson.trim().isNotEmpty) {
         final decoded = jsonDecode(rawConvJson);
         if (decoded is List) {
+          // Bersihkan data dummy bawaan lama jika pernah tersimpan di cache disk
           _conversationsCache = decoded
               .whereType<Map<String, dynamic>>()
               .map((item) => ChatConversation.fromJson(item))
+              .where(
+                (c) => !const {
+                  'conv-1',
+                  'conv-2',
+                  'conv-3',
+                  'conv-4',
+                }.contains(c.id),
+              )
               .toList();
         }
-      } else {
-        await _persistConversations(prefs);
-      }
-
-      final conv1Key =
-          '$keyMessagesPrefix'
-          'conv-1';
-      final rawConv1 = prefs.getString(conv1Key);
-      if (rawConv1 != null && rawConv1.trim().isNotEmpty) {
-        final decoded = jsonDecode(rawConv1);
-        if (decoded is List) {
-          _messagesCache['conv-1'] = decoded
-              .whereType<Map<String, dynamic>>()
-              .map((item) => ChatMessage.fromJson(item))
-              .toList();
-        }
-      } else {
-        await _persistMessages(prefs, 'conv-1', defaultConv1Messages);
       }
     } catch (_) {
       // Penanganan jika JSON korup: tetap gunakan cache memori yang aman
+      _conversationsCache = [];
     } finally {
       _isLoadedFromDisk = true;
     }
@@ -239,13 +134,6 @@ class LocalChatRepository implements ChatRepository {
           }
         } catch (_) {}
       }
-    }
-
-    if (conversationId == 'conv-1') {
-      _messagesCache[conversationId] = List<ChatMessage>.from(
-        defaultConv1Messages,
-      );
-      return List<ChatMessage>.from(defaultConv1Messages);
     }
 
     _messagesCache[conversationId] = [];
@@ -360,9 +248,8 @@ class LocalChatRepository implements ChatRepository {
 
   @override
   Future<void> clearAllData() async {
-    _conversationsCache = List<ChatConversation>.from(defaultConversations);
+    _conversationsCache = [];
     _messagesCache.clear();
-    _messagesCache['conv-1'] = List<ChatMessage>.from(defaultConv1Messages);
 
     final prefs = await _getPrefs();
     if (prefs != null) {

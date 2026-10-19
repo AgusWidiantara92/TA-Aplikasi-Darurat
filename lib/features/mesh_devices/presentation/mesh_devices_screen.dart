@@ -29,6 +29,7 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
   List<DiscoveredPeer> _physicalPeers = [];
   bool _isAdvertising = false;
   bool _isDiscovering = false;
+  TransportConnectionEvent? _lastEvent;
 
   @override
   void initState() {
@@ -43,13 +44,18 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
       if (!mounted) return;
       setState(() {
         _physicalPeers = peers;
+        _isAdvertising = _transport.isAdvertising;
+        _isDiscovering = _transport.isDiscovering;
       });
     });
 
     _eventsSub = _transport.connectionEventsStream.listen((event) {
       if (!mounted) return;
       setState(() {
+        _lastEvent = event;
         _physicalPeers = _transport.currentPeers;
+        _isAdvertising = _transport.isAdvertising;
+        _isDiscovering = _transport.isDiscovering;
       });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -212,6 +218,21 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
         .where((p) => p.status != PeerConnectionStatus.connected)
         .length;
 
+    final String statusLabel;
+    if (connectedCount > 0) {
+      statusLabel = 'TERHUBUNG • $connectedCount PEER AKTIF';
+    } else if (_isDiscovering) {
+      statusLabel = 'MEMINDAI • ${_physicalPeers.length} PEER TERDETEKSI';
+    } else if (_isAdvertising) {
+      statusLabel = 'MENYIARKAN • NODE TERLIHAT';
+    } else if (_lastEvent != null &&
+        _lastEvent!.status == PeerConnectionStatus.disconnected &&
+        _physicalPeers.isEmpty) {
+      statusLabel = 'KONEKSI TERPUTUS • SIAGA';
+    } else {
+      statusLabel = 'MODE SIAGA • ${_physicalPeers.length} PEER TERDETEKSI';
+    }
+
     return Scaffold(
       backgroundColor: AppColors.background,
       body: SafeArea(
@@ -223,7 +244,7 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
             // Konten Scrollable
             Expanded(
               child: ListView(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 96),
                 children: [
                   // Banner Card Biru Gelap
                   Container(
@@ -237,9 +258,7 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          (_isDiscovering || _isAdvertising)
-                              ? 'PENCARIAN AKTIF • ${_physicalPeers.length} PEER TERDETEKSI'
-                              : 'MODE SIAGA • ${_physicalPeers.length} PEER TERDETEKSI',
+                          statusLabel,
                           style: const TextStyle(
                             color: AppColors.accentCyan,
                             fontSize: 10,

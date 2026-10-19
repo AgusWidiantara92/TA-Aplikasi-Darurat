@@ -357,7 +357,7 @@ class _HomeScreenState extends State<HomeScreen> {
       backgroundColor: AppColors.background,
       body: SafeArea(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.only(bottom: 24),
+          padding: const EdgeInsets.only(bottom: 80),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -578,7 +578,9 @@ class _HomeScreenState extends State<HomeScreen> {
                           ],
                         ),
                         const SizedBox(height: 14),
-                        Row(
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
                           children: [
                             StatusBadge(
                               label: '${_peers.length} Perangkat Terdeteksi',
@@ -587,43 +589,35 @@ class _HomeScreenState extends State<HomeScreen> {
                               icon: Icons.devices,
                               fontSize: 11,
                             ),
-                            const SizedBox(width: 8),
-                            const Expanded(
-                              child: StatusBadge(
-                                label: 'INTERNET TIDAK DIBUTUHKAN',
-                                backgroundColor: AppColors.successGreenLight,
-                                textColor: AppColors.successGreen,
-                                icon: Icons.check_circle_outline,
-                                fontSize: 10,
-                              ),
+                            const StatusBadge(
+                              label: 'INTERNET TIDAK DIBUTUHKAN',
+                              backgroundColor: AppColors.successGreenLight,
+                              textColor: AppColors.successGreen,
+                              icon: Icons.check_circle_outline,
+                              fontSize: 10,
                             ),
                           ],
                         ),
-                        const SizedBox(height: 16),
-                        const Divider(height: 1),
                         const SizedBox(height: 14),
-                        // Parameter Teknis Riil (Jujur sesuai hardware & protokol)
+                        const Divider(height: 1),
+                        const SizedBox(height: 12),
                         Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            _buildMetricColumn(
-                              'Kekuatan Hop',
-                              connected.isNotEmpty
-                                  ? '1-Hop Langsung'
-                                  : 'Tidak diukur',
-                              connected.isNotEmpty
-                                  ? AppColors.successGreen
-                                  : AppColors.textMuted,
+                          children: const [
+                            Icon(
+                              Icons.security_outlined,
+                              size: 16,
+                              color: AppColors.primaryNavy,
                             ),
-                            _buildMetricColumn(
-                              'Keamanan',
-                              'SACJ-v1 HMAC Auth',
-                              AppColors.primaryNavy,
-                            ),
-                            _buildMetricColumn(
-                              'Baterai Node',
-                              'Sensor OS (Tidak terbaca)',
-                              AppColors.textMuted,
+                            SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                'Autentikasi Paket: SACJ-v1 Header HMAC',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppColors.primaryNavy,
+                                ),
+                              ),
                             ),
                           ],
                         ),
@@ -632,142 +626,10 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
               ),
-
-              const SizedBox(height: 16),
-
-              // Kartu 2: Radar Sinyal Warga (Perangkat Terdekat)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: AppColors.primaryNavy,
-                    borderRadius: BorderRadius.circular(18),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          const Text(
-                            'RADAR SINYAL WARGA',
-                            style: TextStyle(
-                              fontSize: 10,
-                              fontWeight: FontWeight.w600,
-                              color: AppColors.accentCyan,
-                              letterSpacing: 0.5,
-                            ),
-                          ),
-                          StatusBadge(
-                            label: '${_peers.length} Terdeteksi',
-                            backgroundColor: Colors.white.withValues(
-                              alpha: 0.15,
-                            ),
-                            textColor: Colors.white,
-                            fontSize: 10,
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 6),
-                      const Text(
-                        'Perangkat Terdekat',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        'Lacak relawan & warga di radius sinyal radio aktif untuk koordinasi darurat langsung.',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Colors.white.withValues(alpha: 0.8),
-                          height: 1.3,
-                        ),
-                      ),
-                      const SizedBox(height: 14),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 8,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.08),
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text(
-                                  'Jangkauan Radio Fisik',
-                                  style: TextStyle(
-                                    fontSize: 10,
-                                    color: AppColors.accentCyan,
-                                  ),
-                                ),
-                                Text(
-                                  '1-Hop Direct (~10-100m)',
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.white.withValues(alpha: 0.9),
-                                  ),
-                                ),
-                              ],
-                            ),
-                            TextButton(
-                              style: TextButton.styleFrom(
-                                padding: EdgeInsets.zero,
-                                minimumSize: Size.zero,
-                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                              ),
-                              onPressed: widget.onNavigateToDevices,
-                              child: const Text(
-                                'Buka Pemetaan →',
-                                style: TextStyle(
-                                  color: AppColors.accentCyan,
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
             ],
           ),
         ),
       ),
-    );
-  }
-
-  Widget _buildMetricColumn(String label, String value, Color valueColor) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          label,
-          style: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
-        ),
-        const SizedBox(height: 3),
-        Text(
-          value,
-          style: TextStyle(
-            fontSize: 12,
-            fontWeight: FontWeight.bold,
-            color: valueColor,
-          ),
-        ),
-      ],
     );
   }
 }
