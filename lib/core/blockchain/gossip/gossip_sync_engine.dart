@@ -49,10 +49,20 @@ class PeerGossipSession {
   final Set<String> activeRequestedHashes = {};
   DateTime? activeRequestTime;
 
+  // Pelacakan requestId dari DAG_GET_BLOCKS yang dilayani ke peer ini
+  final Set<String> servedRequestIds = {};
+
   DateTime lastActivity;
 
   PeerGossipSession({required this.endpointId})
     : lastActivity = DateTime.now().toUtc();
+
+  void addServedRequestId(String reqId) {
+    if (servedRequestIds.length >= 50) {
+      servedRequestIds.remove(servedRequestIds.first);
+    }
+    servedRequestIds.add(reqId);
+  }
 
   void clearActiveRequest() {
     activeRequestId = null;
@@ -427,6 +437,7 @@ class DagGossipSyncEngine {
     PeerGossipSession session,
     DagGetBlocksMessage msg,
   ) async {
+    session.addServedRequestId(msg.requestId);
     final availableBlocks = <SecurityBlock>[];
     final prunedHashes = <String>[];
 
@@ -578,7 +589,10 @@ class DagGossipSyncEngine {
       return;
     }
 
-    final acceptedHashes = <String>[];
+    // Ambil snapshot ledger sebelum mutasi apa pun untuk jaminan rollback jika persistensi gagal
+    final preIngestSnapshot = ledger.exportPersistedState();
+
+    final tentativelyAcceptedBlocks = <SecurityBlock>[];
     final rejectedHashes = <String>[];
     String? firstRejectCode;
     String? firstRejectMessage;
@@ -594,7 +608,7 @@ class DagGossipSyncEngine {
         continue;
       }
 
-      // 3. Tolak blok duplikat tanpa mutasi ganda
+      // 3. Tolak blok duplikat tanpa mutasi ganda (sudah tersimpan sebelumnya)
       if (ledger.processedBlockHashes.contains(block.blockHash)) {
         session.missingBlockHashes.remove(block.blockHash);
         session.knownPeerBlockHashes.add(block.blockHash);
@@ -604,11 +618,11 @@ class DagGossipSyncEngine {
       // 4. Validasi aturan ledger (Merkle root, header hash, schema, DAG acyclicity, parent availability)
       final addResult = ledger.acceptRemoteBlock(block);
       if (addResult.isValid) {
-        _totalRemoteBlocksAccepted++;
-        acceptedHashes.add(block.blockHash);
-        session.missingBlockHashes.remove(block.blockHash);
-        session.knownPeerBlockHashes.add(block.blockHash);
+        tentativelyAcceptedBlocks.add(block);
       } else {
+        debugPrint(
+          '[DagGossipSyncEngine] Blok ${block.blockHash} ditolak oleh ledger: ${addResult.status} - ${addResult.message}',
+        );
         _totalRemoteBlocksRejected++;
         rejectedHashes.add(block.blockHash);
         firstRejectCode ??= _mapLedgerStatusToRejectCode(addResult.status);
@@ -616,22 +630,66 @@ class DagGossipSyncEngine {
       }
     }
 
-    // 5. Persistensikan state ke repository jika terdapat blok yang berhasil diterima
-    if (acceptedHashes.isNotEmpty && repository != null) {
-      try {
-        await repository!.saveState(ledger.exportPersistedState());
-      } catch (e) {
-        debugPrint(
-          '[DagGossipSyncEngine] Gagal menyimpan state ke repository: $e',
-        );
+    // 5. Persistensikan state ke repository jika terdapat blok yang berhasil divalidasi
+    final confirmedAcceptedHashes = <String>[];
+    bool persistSuccess = true;
+
+    if (tentativelyAcceptedBlocks.isNotEmpty) {
+      if (repository != null) {
+        try {
+          final saved = await repository!.saveState(
+            ledger.exportPersistedState(),
+          );
+          if (!saved) {
+            persistSuccess = false;
+            debugPrint(
+              '[DagGossipSyncEngine] repository.saveState() mengembalikan false untuk batch ${batch.requestId}',
+            );
+          }
+        } catch (e) {
+          persistSuccess = false;
+          debugPrint(
+            '[DagGossipSyncEngine] Exception saat repository.saveState(): $e',
+          );
+        }
+
+        if (!persistSuccess) {
+          // ROLLBACK: Batalkan seluruh mutasi ledger in-memory kembali ke snapshot sebelum batch.
+          // Blok yang gagal disimpan TIDAK dihitung sebagai accepted,
+          // TIDAK dimasukkan ke confirmedAcceptedHashes,
+          // TIDAK dihapus dari session.missingBlockHashes (tetap dapat diminta ulang setelah storage pulih),
+          // dan TIDAK dimasukkan ke session.knownPeerBlockHashes.
+          ledger.restoreFromPersistedState(preIngestSnapshot);
+        } else {
+          // Penyimpanan persisten BERHASIL: konfirmasi seluruh blok yang tersimpan
+          for (final block in tentativelyAcceptedBlocks) {
+            _totalRemoteBlocksAccepted++;
+            confirmedAcceptedHashes.add(block.blockHash);
+            session.missingBlockHashes.remove(block.blockHash);
+            session.knownPeerBlockHashes.add(block.blockHash);
+          }
+        }
+      } else {
+        // Mode tanpa repository (in-memory test): RAM adalah satu-satunya store
+        for (final block in tentativelyAcceptedBlocks) {
+          _totalRemoteBlocksAccepted++;
+          confirmedAcceptedHashes.add(block.blockHash);
+          session.missingBlockHashes.remove(block.blockHash);
+          session.knownPeerBlockHashes.add(block.blockHash);
+        }
       }
     }
 
-    // Bersihkan active request dari sesi peminta
+    // Blok yang secara permanen ditolak oleh validasi ledger/privasi dibersihkan dari missingBlockHashes
+    if (rejectedHashes.isNotEmpty) {
+      session.missingBlockHashes.removeAll(rejectedHashes);
+    }
+
+    // Bersihkan active request dari sesi peminta agar tidak terkunci
     session.clearActiveRequest();
 
-    // 6. Kirim respons konfirmasi (ACK) hanya untuk blok yang benar-benar diterima
-    if (acceptedHashes.isNotEmpty) {
+    // 6. Kirim respons konfirmasi (ACK) HANYA untuk blok yang benar-benar berhasil dipersistensikan
+    if (confirmedAcceptedHashes.isNotEmpty) {
       final tips = ledger.tipHashes.toList()..sort();
       final effectiveTips = tips.isEmpty
           ? [ledger.genesisBlock.blockHash]
@@ -640,12 +698,13 @@ class DagGossipSyncEngine {
       final ack = DagSyncAckMessage(
         senderNodeId: localNodeId,
         requestId: batch.requestId,
-        acceptedBlockHashes: acceptedHashes,
+        acceptedBlockHashes: confirmedAcceptedHashes,
         newTipHashes: effectiveTips,
       );
       final sent = await _sendMessage(endpointId, ack);
       if (sent) _totalSyncAckSent++;
-    } else if (rejectedHashes.isNotEmpty) {
+    } else if (rejectedHashes.isNotEmpty && persistSuccess) {
+      // Hanya kirim DAG_REJECT jika penolakan disebabkan oleh isi blok (bukan kegagalan penyimpanan lokal)
       final reject = DagRejectMessage(
         senderNodeId: localNodeId,
         requestId: batch.requestId,
@@ -658,8 +717,9 @@ class DagGossipSyncEngine {
       if (sent) _totalRejectSent++;
     }
 
-    // 7. Jika masih ada hash kandidat yang belum dimiliki, minta batch berikutnya
-    if (session.missingBlockHashes.isNotEmpty) {
+    // 7. Jika persistensi sukses dan masih ada hash kandidat yang belum dimiliki, minta batch berikutnya.
+    // MENCEGAH INFINITE RETRY LOOP: Jangan memicu permintaan berikutnya jika penyimpanan lokal gagal!
+    if (persistSuccess && session.missingBlockHashes.isNotEmpty) {
       await _sendGetBlocks(endpointId, session);
     }
   }
@@ -670,7 +730,16 @@ class DagGossipSyncEngine {
     PeerGossipSession session,
     DagSyncAckMessage ack,
   ) {
+    // Validasi bahwa requestId pada ACK sesuai dengan batch yang pernah dilayani untuk peer ini
+    if (!session.servedRequestIds.contains(ack.requestId)) {
+      debugPrint(
+        '[DagGossipSyncEngine] Mengabaikan DAG_SYNC_ACK dari $endpointId: '
+        'requestId "${ack.requestId}" tidak cocok dengan request yang pernah dilayani',
+      );
+      return;
+    }
     _totalSyncAckReceived++;
+    session.servedRequestIds.remove(ack.requestId);
     session.knownPeerBlockHashes.addAll(ack.acceptedBlockHashes);
     if (ack.newTipHashes.isNotEmpty) {
       session.lastReceivedTipHashes = List.from(ack.newTipHashes);

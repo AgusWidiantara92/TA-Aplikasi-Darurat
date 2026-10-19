@@ -355,10 +355,12 @@ class SecurityAuditEvent {
       ),
       observerNodeId: map['observerNodeId'] as String,
       targetNodeId: map['targetNodeId'] as String,
-      timestamp: DateTime.fromMillisecondsSinceEpoch(
-        map['timestampMs'] as int,
-        isUtc: true,
-      ),
+      timestamp: map['timestampIso'] != null
+          ? DateTime.parse(map['timestampIso'] as String).toUtc()
+          : DateTime.fromMillisecondsSinceEpoch(
+              map['timestampMs'] as int,
+              isUtc: true,
+            ),
       monotonicMicros: (map['monotonicMicros'] as num?)?.toInt() ?? 0,
       metadata: Map<String, dynamic>.from(map['metadata'] as Map? ?? {}),
     );
