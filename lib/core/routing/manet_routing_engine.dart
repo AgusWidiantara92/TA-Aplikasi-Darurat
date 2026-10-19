@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import '../../features/chat/data/repositories/chat_repository.dart';
 import '../../features/chat/models/chat_message.dart';
 import '../transport/mesh_transport.dart';
+import '../ids/selective_forwarding_detector.dart';
 import 'deduplication_cache.dart';
 import 'mesh_experiment_logger.dart';
 import 'message_envelope.dart';
@@ -27,6 +28,8 @@ class ManetRoutingEngine {
   final StoreAndForwardQueue storeAndForwardQueue;
   final ChatRepository? repository;
   final MeshExperimentLogger? experimentLogger;
+  final SelectiveForwardingDetector? idsDetector;
+  final bool enableHopAck;
 
   StreamSubscription<TransportConnectionEvent>? _eventsSub;
   StreamSubscription<TransportPayload>? _payloadSub;
@@ -44,9 +47,14 @@ class ManetRoutingEngine {
     StoreAndForwardQueue? storeAndForwardQueue,
     this.repository,
     this.experimentLogger,
+    this.idsDetector,
+    this.enableHopAck = false,
   }) : neighborTable = neighborTable ?? NeighborTable(),
        dedupCache = dedupCache ?? DeduplicationCache(),
        storeAndForwardQueue = storeAndForwardQueue ?? StoreAndForwardQueue() {
+    if (idsDetector != null && experimentLogger != null) {
+      idsDetector!.experimentLogger ??= experimentLogger;
+    }
     _initListeners();
   }
 
@@ -84,6 +92,14 @@ class ManetRoutingEngine {
       _flushQueueForEndpoint(event.endpointId);
     } else if (event.status == PeerConnectionStatus.disconnected ||
         event.status == PeerConnectionStatus.rejected) {
+      final peer = neighborTable.getPeerByEndpoint(event.endpointId);
+      final peerNodeId = peer?.nodeId;
+      if (peerNodeId != null && !peerNodeId.startsWith('pending-')) {
+        idsDetector?.registerLinkFailure(
+          peerNodeId: peerNodeId,
+          reason: 'TRANSPORT_LINK_DISCONNECTED',
+        );
+      }
       neighborTable.markDisconnected(event.endpointId);
     }
   }
@@ -153,7 +169,40 @@ class ManetRoutingEngine {
       return;
     }
 
-    // 2. Tangani Pesan Obrolan (CHAT_MESSAGE)
+    // 2. Tangani Tanda Terima Hop Relai (HOP_ACK / RELAY_CLAIM)
+    if (envelope.type == MessageEnvelope.typeHopAck) {
+      final ackedEnvelopeId = envelope.payload['ackedEnvelopeId'] as String?;
+      if (ackedEnvelopeId != null) {
+        final registered =
+            idsDetector?.registerRelayClaimed(
+              peerNodeId: envelope.senderId,
+              envelopeId: ackedEnvelopeId,
+            ) ??
+            false;
+
+        experimentLogger?.log(
+          envelopeId: envelope.envelopeId,
+          messageId: ackedEnvelopeId,
+          senderId: envelope.senderId,
+          recipientId: localNodeId,
+          eventType: MeshExperimentEventType.received,
+          hopCount: envelope.hopCount,
+          routeTrace: envelope.routeTrace,
+          connectionStatus: 'CONNECTED',
+          activeNeighborCount: neighborTable.activeNeighbors.length,
+          outcome: registered ? 'HOP_ACK_RELAY_CLAIMED' : 'HOP_ACK_UNMATCHED',
+          syntheticMetadata: {
+            'ackedEnvelopeId': ackedEnvelopeId,
+            'evidenceLevel': 'RELAY_CLAIMED',
+            'isVerifiedDownstream': false,
+            'isObligationMatched': registered,
+          },
+        );
+      }
+      return;
+    }
+
+    // 3. Tangani Pesan Obrolan (CHAT_MESSAGE)
     if (envelope.type == MessageEnvelope.typeChat) {
       final messageId =
           envelope.payload['messageId'] as String? ?? envelope.envelopeId;
@@ -161,6 +210,11 @@ class ManetRoutingEngine {
       // Aturan A: Pemeriksaan Deduplikasi
       if (dedupCache.checkAndAdd(envelope.envelopeId)) {
         // Pesan duplikat telah dilihat sebelumnya, hentikan penyebaran!
+        idsDetector?.registerProtocolDrop(
+          peerNodeId: envelope.senderId,
+          envelopeId: envelope.envelopeId,
+          reason: 'DEDUP_CACHE_HIT',
+        );
         experimentLogger?.log(
           envelopeId: envelope.envelopeId,
           messageId: messageId,
@@ -180,6 +234,11 @@ class ManetRoutingEngine {
       // Aturan B: Pencegahan Loop Perutean
       if (envelope.routeTrace.contains(localNodeId)) {
         // Pesan sudah pernah melewati node ini sebelumnya, hentikan loop!
+        idsDetector?.registerProtocolDrop(
+          peerNodeId: envelope.senderId,
+          envelopeId: envelope.envelopeId,
+          reason: 'ROUTE_LOOP_DETECTED',
+        );
         experimentLogger?.log(
           envelopeId: envelope.envelopeId,
           messageId: messageId,
@@ -199,6 +258,11 @@ class ManetRoutingEngine {
       // Aturan C: Pemeriksaan Batas Hop / TTL
       if (envelope.ttl <= 0) {
         // Masa hidup paket habis, buang!
+        idsDetector?.registerProtocolDrop(
+          peerNodeId: envelope.senderId,
+          envelopeId: envelope.envelopeId,
+          reason: 'TTL_EXPIRED',
+        );
         experimentLogger?.log(
           envelopeId: envelope.envelopeId,
           messageId: messageId,
@@ -308,6 +372,24 @@ class ManetRoutingEngine {
           activeNeighborCount: activeNeighbors.length,
           outcome: 'FORWARDED_DIRECT_NEIGHBOR',
         );
+
+        // Kirim HOP_ACK ke pengirim sebelumnya jika diaktifkan
+        if (enableHopAck || (idsDetector?.config.autoSendHopAck ?? false)) {
+          _sendHopAck(sourceEndpointId, envelope.envelopeId);
+        }
+
+        // Daftarkan ekspektasi ke hop berikutnya jika bukan tujuan akhir dan TTL > 1
+        final nextHopNodeId = neighborTable.getNodeIdForEndpoint(
+          directEndpointId,
+        );
+        if (nextHopNodeId != null &&
+            nextHopNodeId != forwardedEnvelope.recipientId &&
+            forwardedEnvelope.ttl > 1) {
+          idsDetector?.registerForwardingExpected(
+            peerNodeId: nextHopNodeId,
+            envelopeId: forwardedEnvelope.envelopeId,
+          );
+        }
         return;
       } catch (e) {
         debugPrint(
@@ -352,6 +434,25 @@ class ManetRoutingEngine {
         activeNeighborCount: activeNeighbors.length,
         outcome: 'FORWARDED_FLOODING',
       );
+
+      // Kirim HOP_ACK ke pengirim sebelumnya jika diaktifkan
+      if (enableHopAck || (idsDetector?.config.autoSendHopAck ?? false)) {
+        _sendHopAck(sourceEndpointId, envelope.envelopeId);
+      }
+
+      // Daftarkan ekspektasi ke seluruh tetangga downstream jika TTL > 1
+      if (idsDetector != null && forwardedEnvelope.ttl > 1) {
+        for (final neighbor in activeNeighbors) {
+          if (neighbor.endpointId != sourceEndpointId &&
+              neighbor.nodeId != forwardedEnvelope.recipientId &&
+              !forwardedEnvelope.routeTrace.contains(neighbor.nodeId)) {
+            idsDetector?.registerForwardingExpected(
+              peerNodeId: neighbor.nodeId,
+              envelopeId: forwardedEnvelope.envelopeId,
+            );
+          }
+        }
+      }
     } else {
       // Jika tidak ada tetangga lain yang dapat dijangkau, simpan di buffer antrean
       storeAndForwardQueue.enqueue(forwardedEnvelope);
@@ -369,6 +470,29 @@ class ManetRoutingEngine {
         outcome: 'STORED_IN_BUFFER',
       );
     }
+  }
+
+  void _sendHopAck(String targetEndpointId, String ackedEnvelopeId) async {
+    final targetNodeId =
+        neighborTable.getNodeIdForEndpoint(targetEndpointId) ?? 'BROADCAST';
+    final hopAck = MessageEnvelope(
+      envelopeId: 'ack-$ackedEnvelopeId-$localNodeId',
+      type: MessageEnvelope.typeHopAck,
+      senderId: localNodeId,
+      senderName: localNodeName,
+      recipientId: targetNodeId,
+      createdAt: DateTime.now().millisecondsSinceEpoch,
+      ttl: 1,
+      hopCount: 0,
+      routeTrace: [localNodeId],
+      payload: {'ackedEnvelopeId': ackedEnvelopeId, 'status': 'RELAY_CLAIMED'},
+    );
+    try {
+      await transport.sendBytes(
+        endpointId: targetEndpointId,
+        bytes: hopAck.toBytes(),
+      );
+    } catch (_) {}
   }
 
   /// Menyampaikan pesan yang ditujukan untuk node ini ke ChatRepository lokal.
@@ -541,6 +665,17 @@ class ManetRoutingEngine {
           activeNeighborCount: activeNeighbors.length,
           outcome: 'TRANSMITTED_FLOODING',
         );
+
+        if (idsDetector != null && envelope.ttl > 1) {
+          for (final neighbor in activeNeighbors) {
+            if (neighbor.nodeId != recipientNodeId) {
+              idsDetector?.registerForwardingExpected(
+                peerNodeId: neighbor.nodeId,
+                envelopeId: envelope.envelopeId,
+              );
+            }
+          }
+        }
       }
     }
 

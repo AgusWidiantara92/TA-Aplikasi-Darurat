@@ -10,6 +10,7 @@ enum MeshExperimentEventType {
   queued,
   expired,
   rejected,
+  idsDetection,
 }
 
 /// Representasi data satu peristiwa eksperimen perutean terkendali SiagaMesh.
@@ -164,6 +165,70 @@ class MeshExperimentLogger {
 
     if (_events.length >= maxEvents) {
       _events.removeAt(0); // Buang peristiwa tertua jika buffer meluap
+    }
+    _events.add(event);
+
+    if (!_controller.isClosed) {
+      _controller.add(event);
+    }
+  }
+
+  /// Mencatat peristiwa klasifikasi/alarm deteksi IDS ke dalam log eksperimen.
+  void logIdsDetection({
+    required String targetNodeId,
+    required String observerNodeId,
+    required String status,
+    required String reason,
+    required int totalExpected,
+    required int totalConfirmed,
+    required int totalUnconfirmed,
+    required int totalLinkFailures,
+    required int totalProtocolDrops,
+    required double observedDropRate,
+    required Map<String, dynamic> thresholdConfig,
+    String? runId,
+    String? simulationGroundTruth,
+  }) {
+    _eventCounter++;
+    final syntheticMeta = <String, dynamic>{
+      'detectionStatus': status,
+      'targetNodeId': targetNodeId,
+      'observerNodeId': observerNodeId,
+      'classificationReason': reason,
+      'totalExpected': totalExpected,
+      'totalConfirmed': totalConfirmed,
+      'totalUnconfirmed': totalUnconfirmed,
+      'totalLinkFailures': totalLinkFailures,
+      'totalProtocolDrops': totalProtocolDrops,
+      'observedDropRate': observedDropRate,
+      'thresholdConfig': thresholdConfig,
+    };
+    if (simulationGroundTruth != null) {
+      syntheticMeta['simulationGroundTruth'] = simulationGroundTruth;
+    }
+
+    final event = MeshExperimentEvent(
+      eventId: 'ids-$_eventCounter',
+      runId: runId ?? activeRunId,
+      testType: activeTestType,
+      envelopeId: 'IDS-$targetNodeId-$_eventCounter',
+      messageId: 'STATUS-$status',
+      senderId: observerNodeId,
+      recipientId: targetNodeId,
+      eventType: MeshExperimentEventType.idsDetection,
+      localTimestamp: DateTime.now(),
+      monotonicMicros: _stopwatch.elapsedMicroseconds,
+      hopCount: 0,
+      routeTrace: [observerNodeId, targetNodeId],
+      connectionStatus: 'ACTIVE',
+      activeNeighborCount: 1,
+      failureReason: reason,
+      outcome: status,
+      syntheticMetadata: syntheticMeta,
+    );
+
+    if (_events.length >= maxEvents) {
+      _events.removeAt(0);
     }
     _events.add(event);
 

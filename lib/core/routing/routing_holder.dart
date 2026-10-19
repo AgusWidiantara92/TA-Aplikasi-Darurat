@@ -1,4 +1,5 @@
 import '../../features/chat/data/repositories/chat_repository.dart';
+import '../ids/selective_forwarding_detector.dart';
 import '../transport/transport_holder.dart';
 import 'manet_routing_engine.dart';
 import 'mesh_experiment_logger.dart';
@@ -11,11 +12,18 @@ import 'node_identity.dart';
 class ManetRoutingHolder {
   static ManetRoutingEngine? _instance;
   static MeshExperimentLogger? _logger;
+  static SelectiveForwardingDetector? _idsDetector;
 
   static MeshExperimentLogger get logger => _logger ??= MeshExperimentLogger();
 
   static void setLogger(MeshExperimentLogger? logger) {
     _logger = logger;
+  }
+
+  static SelectiveForwardingDetector? get idsDetector => _idsDetector;
+
+  static void setIdsDetector(SelectiveForwardingDetector? detector) {
+    _idsDetector = detector;
   }
 
   static ManetRoutingEngine get instance {
@@ -24,6 +32,8 @@ class ManetRoutingHolder {
       identityManager: NodeIdentityManager(),
       repository: ChatRepositoryHolder.instance,
       experimentLogger: logger,
+      idsDetector: _idsDetector,
+      enableHopAck: _idsDetector != null,
     );
   }
 
@@ -35,5 +45,7 @@ class ManetRoutingHolder {
   static void reset() {
     _instance?.dispose();
     _instance = null;
+    _idsDetector?.dispose();
+    _idsDetector = null;
   }
 }
