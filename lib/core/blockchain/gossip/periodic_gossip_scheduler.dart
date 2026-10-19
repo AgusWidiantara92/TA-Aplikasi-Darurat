@@ -32,6 +32,9 @@ class PeriodicGossipConfig {
   /// Batas waktu timeout permintaan blok in-flight sebelum dianggap tidak merespons (default: 15 detik).
   final Duration requestTimeout;
 
+  /// Batas waktu kedaluwarsa respons peer terhadap rekonsiliasi inventaris periodik (default: 15 detik).
+  final Duration responseTimeout;
+
   /// Apakah scheduler otomatis menjalankan Timer periodic di latar belakang (default: true).
   /// Disetel false pada unit/integration test untuk pengujian deterministik manual tanpa kebocoran timer.
   final bool autoStartTimer;
@@ -43,6 +46,7 @@ class PeriodicGossipConfig {
     this.jitterRange = kDefaultPeriodicGossipJitterRange,
     this.jitterProvider,
     this.requestTimeout = kGossipRequestTimeout,
+    this.responseTimeout = kPeriodicGossipResponseTimeout,
     this.autoStartTimer = true,
   });
 
@@ -84,6 +88,7 @@ class PeriodicGossipScheduler {
   bool _isRunning = false;
   bool _isDisposed = false;
   final Map<String, Timer> _peerTimers = {};
+  final Map<String, Timer> _responseTimeoutTimers = {};
 
   PeriodicGossipScheduler({
     this.config = const PeriodicGossipConfig(),
@@ -100,6 +105,13 @@ class PeriodicGossipScheduler {
 
   /// Jumlah timer aktif yang sedang terpasang untuk masing-masing peer.
   int get activeTimersCount => _peerTimers.length;
+
+  /// Jumlah timer timeout respons rekonsiliasi yang sedang aktif berjalan.
+  int get activeResponseTimeoutTimersCount => _responseTimeoutTimers.length;
+
+  /// Total seluruh timer aktif (peer schedule + response timeout).
+  int get totalActiveTimersCount =>
+      _peerTimers.length + _responseTimeoutTimers.length;
 
   /// Memulai scheduler periodik untuk seluruh peer yang memenuhi syarat.
   void start() {
@@ -121,6 +133,10 @@ class PeriodicGossipScheduler {
       timer.cancel();
     }
     _peerTimers.clear();
+    for (final timer in _responseTimeoutTimers.values) {
+      timer.cancel();
+    }
+    _responseTimeoutTimers.clear();
   }
 
   /// Menjadwalkan eksekusi rekonsiliasi berikutnya untuk satu peer tertentu.
@@ -139,10 +155,35 @@ class PeriodicGossipScheduler {
     });
   }
 
-  /// Membatalkan jadwal rekonsiliasi untuk satu peer tertentu (misal saat terputus).
+  /// Menjadwalkan timer batas waktu respons rekonsiliasi untuk peer tertentu jika [autoStartTimer] aktif.
+  void scheduleResponseTimeout(
+    String endpointId,
+    Duration timeout,
+    void Function() onTimeout,
+  ) {
+    _responseTimeoutTimers[endpointId]?.cancel();
+    _responseTimeoutTimers.remove(endpointId);
+
+    if (!_isRunning || _isDisposed || !config.autoStartTimer) return;
+
+    _responseTimeoutTimers[endpointId] = Timer(timeout, () {
+      _responseTimeoutTimers.remove(endpointId);
+      if (!_isRunning || _isDisposed) return;
+      onTimeout();
+    });
+  }
+
+  /// Membatalkan timer batas waktu respons rekonsiliasi untuk peer tertentu.
+  void cancelResponseTimeout(String endpointId) {
+    _responseTimeoutTimers[endpointId]?.cancel();
+    _responseTimeoutTimers.remove(endpointId);
+  }
+
+  /// Membatalkan jadwal rekonsiliasi dan timer timeout untuk satu peer tertentu (misal saat terputus).
   void cancelPeer(String endpointId) {
     _peerTimers[endpointId]?.cancel();
     _peerTimers.remove(endpointId);
+    cancelResponseTimeout(endpointId);
   }
 
   /// Notifikasi bahwa peer baru telah menyelesaikan handshake awal dan siap untuk rekonsiliasi periodik.

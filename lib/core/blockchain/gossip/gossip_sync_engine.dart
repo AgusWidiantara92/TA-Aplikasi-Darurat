@@ -71,11 +71,26 @@ class PeerGossipSession {
 
   DateTime lastActivity;
 
-  // Pelacakan rekonsiliasi periodik dan backoff (Stage 5E.4.6)
-  /// Status apakah sesi ini sedang dalam proses rekonsiliasi aktif (paling banyak 1 per sesi).
+  // Pelacakan rekonsiliasi periodik dan backoff (Stage 5E.4.6 & Stage 5E.4.6.1)
+  /// Status apakah sesi ini sedang dalam proses eksekusi rekonsiliasi aktif (paling banyak 1 per sesi).
   bool isReconciling = false;
 
-  /// Jumlah kegagalan beruntun pada transmisi rekonsiliasi ke peer ini.
+  /// Status apakah sesi ini sedang menunggu respons rekonsiliasi inventaris dari peer (Stage 5E.4.6.1).
+  bool isAwaitingReconcileResponse = false;
+
+  /// Identifier unik percobaan rekonsiliasi aktif saat ini untuk korelasi respons deterministik.
+  String? activeReconcileAttemptId;
+
+  /// Waktu inisiasi pengiriman rekonsiliasi inventaris terakhir.
+  DateTime? reconcileAttemptTime;
+
+  /// Waktu terakhir pesan respons valid diterima dari peer pada sesi ini.
+  DateTime? lastPeerResponseTime;
+
+  /// Waktu terakhir rekonsiliasi terkonfirmasi berhasil pada sesi ini.
+  DateTime? lastReconcileConfirmedTime;
+
+  /// Jumlah kegagalan beruntun pada transmisi atau respons rekonsiliasi ke peer ini.
   int consecutiveFailures = 0;
 
   /// Durasi jeda backoff saat ini setelah kegagalan rekonsiliasi.
@@ -117,6 +132,13 @@ class PeerGossipSession {
     _activeRequestId = null;
     activeRequestedHashes.clear();
     activeRequestTime = null;
+  }
+
+  /// Membersihkan konteks percobaan rekonsiliasi aktif saat ini.
+  void clearReconcileAttempt() {
+    isAwaitingReconcileResponse = false;
+    activeReconcileAttemptId = null;
+    reconcileAttemptTime = null;
   }
 
   /// Mengembalikan state backoff ke kondisi awal (setelah rekonsiliasi berhasil).
@@ -162,11 +184,14 @@ class DagGossipSyncEngine {
   int _totalGossipBytesSent = 0;
   int _totalGossipBytesReceived = 0;
 
-  // Metrik instrumentasi rekonsiliasi periodik (Stage 5E.4.6)
+  // Metrik instrumentasi rekonsiliasi periodik (Stage 5E.4.6 & Stage 5E.4.6.1)
   int _totalPeriodicInvSent = 0;
+  int _totalPeriodicSendSuccess = 0;
+  int _totalPeriodicSendFailures = 0;
+  int _totalPeerResponsesReceived = 0;
   int _totalPeriodicReconcileAttempts = 0;
-  int _totalPeriodicReconcileSuccess = 0;
-  int _totalPeriodicReconcileFailures = 0;
+  int _totalPeriodicReconcileConfirmed = 0;
+  int _totalPeriodicReconcileTimeouts = 0;
 
   DagGossipSyncEngine({
     required this.transport,
@@ -238,13 +263,40 @@ class DagGossipSyncEngine {
   int get totalGossipBytesSent => _totalGossipBytesSent;
   int get totalGossipBytesReceived => _totalGossipBytesReceived;
 
-  // Getters rekonsiliasi periodik (Stage 5E.4.6)
+  // Getters rekonsiliasi periodik (Stage 5E.4.6 & Stage 5E.4.6.1)
   PeriodicGossipScheduler get scheduler => _scheduler;
   PeriodicGossipConfig get periodicConfig => _scheduler.config;
+
+  /// Jumlah pengiriman pesan [DAG_INV] rekonsiliasi periodik yang berhasil di-dispatch ke transport lokal.
   int get totalPeriodicInvSent => _totalPeriodicInvSent;
+
+  /// Jumlah percobaan pengiriman rekonsiliasi yang diterima oleh transport lokal (send success).
+  int get totalPeriodicSendSuccess => _totalPeriodicSendSuccess;
+
+  /// Jumlah kegagalan pengiriman pesan rekonsiliasi pada transport lokal.
+  int get totalPeriodicSendFailures => _totalPeriodicSendFailures;
+
+  /// Jumlah respons pesan gossip yang valid dan terverifikasi diterima dari peer pada sesi aktif (peer responsiveness).
+  int get totalPeerResponsesReceived => _totalPeerResponsesReceived;
+
+  /// Jumlah inisiasi rekonsiliasi periodik yang dicoba ke peer.
   int get totalPeriodicReconcileAttempts => _totalPeriodicReconcileAttempts;
-  int get totalPeriodicReconcileSuccess => _totalPeriodicReconcileSuccess;
-  int get totalPeriodicReconcileFailures => _totalPeriodicReconcileFailures;
+
+  /// Jumlah rekonsiliasi periodik yang terkonfirmasi berhasil oleh respons valid peer dalam batas waktu (reconciliation confirmed).
+  int get totalPeriodicReconcileConfirmed => _totalPeriodicReconcileConfirmed;
+
+  /// Jumlah percobaan rekonsiliasi periodik yang kedaluwarsa tanpa respons dari peer (unresponsive peer timeout).
+  int get totalPeriodicReconcileTimeouts => _totalPeriodicReconcileTimeouts;
+
+  /// Alias semantik untuk rekonsiliasi yang terkonfirmasi berhasil (Stage 5E.4.6.1).
+  ///
+  /// CATATAN SEMANTIK: Metrik ini kini secara eksplisit mencerminkan keberhasilan rekonsiliasi
+  /// yang dikonfirmasi oleh respons peer, BUKAN sekadar keberhasilan pengiriman paket lokal.
+  int get totalPeriodicReconcileSuccess => _totalPeriodicReconcileConfirmed;
+
+  /// Total kegagalan rekonsiliasi (kegagalan transport lokal + batas waktu respons peer terlampaui).
+  int get totalPeriodicReconcileFailures =>
+      _totalPeriodicSendFailures + _totalPeriodicReconcileTimeouts;
 
   List<String> _getEligibleEndpoints() {
     return _sessions.entries
@@ -348,7 +400,8 @@ class DagGossipSyncEngine {
       await _sendHello(event.endpointId, session);
     } else if (event.status == PeerConnectionStatus.disconnected ||
         event.status == PeerConnectionStatus.rejected) {
-      _sessions.remove(event.endpointId);
+      final oldSession = _sessions.remove(event.endpointId);
+      oldSession?.clearReconcileAttempt();
       _scheduler.onPeerDisconnected(event.endpointId);
       // Kebijakan Orphan Block Pool (Stage 5E.4.5):
       // Pemutusan koneksi peer (disconnect) TIDAK serta-merta membuang blok yatim dari orphanPool.
@@ -1244,7 +1297,17 @@ class DagGossipSyncEngine {
       endpointId,
       () => PeerGossipSession(endpointId: endpointId),
     );
-    session.lastActivity = DateTime.now().toUtc();
+    session.lastActivity = _nowProvider();
+
+    // Catat responsivitas peer jika identitas pengirim cocok dengan remoteNodeId sesi (Stage 5E.4.6.1)
+    final isMatchingSender =
+        session.remoteNodeId == null ||
+        session.remoteNodeId!.isEmpty ||
+        session.remoteNodeId == message.senderNodeId;
+    if (isMatchingSender) {
+      _totalPeerResponsesReceived++;
+      session.lastPeerResponseTime = _nowProvider();
+    }
 
     switch (message.type) {
       case DagGossipMessageType.hello:
@@ -1255,12 +1318,13 @@ class DagGossipSyncEngine {
         if (hello.genesisHash != ledger.genesisBlock.blockHash ||
             hello.schemaVersion != 1) {
           // Jangan memproses peer dengan jaringan/skema yang tidak kompatibel; bersihkan sesi
-          _sessions.remove(endpointId);
+          final old = _sessions.remove(endpointId);
+          old?.clearReconcileAttempt();
           _scheduler.onPeerDisconnected(endpointId);
           return;
         }
 
-        session.remoteNodeId = hello.senderNodeId;
+        session.remoteNodeId ??= hello.senderNodeId;
         session.remoteSchemaVersion = hello.schemaVersion;
         session.remoteActiveBlocksCount = hello.activeBlocksCount;
         session.remoteMaxIndex = hello.maxIndex;
@@ -1275,6 +1339,12 @@ class DagGossipSyncEngine {
         if (session.pendingInv != null) {
           final pending = session.pendingInv!;
           session.pendingInv = null;
+          _tryConfirmReconciliationFromPeer(
+            endpointId: endpointId,
+            session: session,
+            message: pending,
+            receivedTime: _nowProvider(),
+          );
           await _processInv(session, pending);
         }
 
@@ -1290,7 +1360,18 @@ class DagGossipSyncEngine {
       case DagGossipMessageType.inv:
         final inv = message as DagInvMessage;
         _totalInvReceived++;
-        session.remoteNodeId = inv.senderNodeId;
+
+        // Validasi identitas pengirim: jika remoteNodeId telah diverifikasi, senderNodeId WAJIB cocok
+        if (session.remoteNodeId != null &&
+            session.remoteNodeId!.isNotEmpty &&
+            inv.senderNodeId != session.remoteNodeId) {
+          debugPrint(
+            '[DagGossipSyncEngine] Mengabaikan DAG_INV dari $endpointId: '
+            'senderNodeId "${inv.senderNodeId}" tidak cocok dengan remoteNodeId "${session.remoteNodeId}"',
+          );
+          return;
+        }
+        session.remoteNodeId ??= inv.senderNodeId;
 
         // Validasi urutan protokol: jika DAG_HELLO yang kompatibel belum diterima,
         // tahan inventaris di pendingInv hingga DAG_HELLO yang valid diverifikasi
@@ -1302,12 +1383,37 @@ class DagGossipSyncEngine {
           return;
         }
 
+        _tryConfirmReconciliationFromPeer(
+          endpointId: endpointId,
+          session: session,
+          message: inv,
+          receivedTime: _nowProvider(),
+        );
+
         await _processInv(session, inv);
         break;
 
       case DagGossipMessageType.getBlocks:
         final getBlocks = message as DagGetBlocksMessage;
         _totalGetBlocksReceived++;
+        if (session.remoteNodeId != null &&
+            session.remoteNodeId!.isNotEmpty &&
+            getBlocks.senderNodeId != session.remoteNodeId) {
+          debugPrint(
+            '[DagGossipSyncEngine] Mengabaikan DAG_GET_BLOCKS dari $endpointId: '
+            'senderNodeId "${getBlocks.senderNodeId}" tidak cocok dengan remoteNodeId "${session.remoteNodeId}"',
+          );
+          return;
+        }
+        session.remoteNodeId ??= getBlocks.senderNodeId;
+
+        _tryConfirmReconciliationFromPeer(
+          endpointId: endpointId,
+          session: session,
+          message: getBlocks,
+          receivedTime: _nowProvider(),
+        );
+
         await _handleGetBlocks(endpointId, session, getBlocks);
         break;
 
@@ -1319,11 +1425,23 @@ class DagGossipSyncEngine {
 
       case DagGossipMessageType.syncAck:
         final ack = message as DagSyncAckMessage;
+        // Invariant: DAG_SYNC_ACK memiliki semantik penerimaan blok dan TIDAK mengonfirmasi rekonsiliasi inventaris!
         _handleSyncAck(endpointId, session, ack);
         break;
 
       case DagGossipMessageType.reject:
         final reject = message as DagRejectMessage;
+        if (session.remoteNodeId != null &&
+            session.remoteNodeId!.isNotEmpty &&
+            reject.senderNodeId != session.remoteNodeId) {
+          return;
+        }
+        _tryConfirmReconciliationFromPeer(
+          endpointId: endpointId,
+          session: session,
+          message: reject,
+          receivedTime: _nowProvider(),
+        );
         _handleReject(endpointId, session, reject);
         break;
 
@@ -1392,11 +1510,16 @@ class DagGossipSyncEngine {
     return true;
   }
 
-  /// Menjalankan rekonsiliasi inventaris untuk satu peer 1-hop yang memenuhi syarat (Stage 5E.4.6).
+  /// Menjalankan rekonsiliasi inventaris untuk satu peer 1-hop yang memenuhi syarat (Stage 5E.4.6 & Stage 5E.4.6.1).
   ///
   /// Mengirimkan pesan [DAG_INV] dengan ringkasan tips dan blok terbaru lokal.
   /// Menerapkan proteksi konkurensi (paling banyak 1 rekonsiliasi aktif per sesi),
-  /// penanganan in-flight request timeout, serta perhitungan backoff terbatas.
+  /// penanganan in-flight request timeout, pelacakan respons peer (liveness), serta perhitungan backoff terbatas.
+  ///
+  /// CATATAN SEMANTIK (Stage 5E.4.6.1):
+  /// Mengembalikan true jika pesan [DAG_INV] berhasil dikirim ke transport nirkabel lokal (send success).
+  /// Keberhasilan rekonsiliasi end-to-end (confirmed reconciliation) baru terjadi dan memulihkan backoff
+  /// setelah peer memberikan respons inventaris yang valid dalam batas waktu [responseTimeout].
   Future<bool> reconcilePeer(String endpointId, [DateTime? now]) async {
     if (!_isEnabled || _isDisposed) return false;
 
@@ -1415,7 +1538,7 @@ class DagGossipSyncEngine {
 
     final currentTime = now ?? _nowProvider();
 
-    // 3. Tangani in-flight request yang masih aktif (jangan duplikasi request)
+    // 3. Tangani in-flight block request yang masih aktif (jangan duplikasi request)
     if (session.activeRequestId != null) {
       if (session.activeRequestTime != null &&
           currentTime.difference(session.activeRequestTime!) >=
@@ -1430,7 +1553,24 @@ class DagGossipSyncEngine {
       }
     }
 
-    // 4. Periksa apakah sesi masih dalam masa jeda backoff
+    // 4. Tangani percobaan rekonsiliasi aktif sebelumnya yang masih menunggu respons (Stage 5E.4.6.1)
+    if (session.isAwaitingReconcileResponse) {
+      if (session.reconcileAttemptTime != null &&
+          currentTime.difference(session.reconcileAttemptTime!) >=
+              _scheduler.config.responseTimeout) {
+        // Percobaan rekonsiliasi periodik sebelumnya kedaluwarsa tanpa respons (peer tidak merespons)
+        session.clearReconcileAttempt();
+        _scheduler.cancelResponseTimeout(endpointId);
+        _totalPeriodicReconcileTimeouts++;
+        _recordReconciliationFailure(endpointId, session, currentTime);
+        return false;
+      } else {
+        // Percobaan rekonsiliasi sebelumnya masih aktif menunggu respons: jangan buat percobaan serentak!
+        return false;
+      }
+    }
+
+    // 5. Periksa apakah sesi masih dalam masa jeda backoff
     if (session.nextEligibleReconcileTime != null &&
         currentTime.isBefore(session.nextEligibleReconcileTime!)) {
       return false;
@@ -1443,10 +1583,28 @@ class DagGossipSyncEngine {
     try {
       sent = await _sendPeriodicInv(endpointId, session);
       if (sent) {
-        _totalPeriodicReconcileSuccess++;
-        _recordReconciliationSuccess(endpointId, session, currentTime);
+        _totalPeriodicSendSuccess++;
+        session.lastPeriodicReconcileTime = currentTime;
+
+        // CATATAN STAGE 5E.4.6.1:
+        // sendBytes() == true HANYA membuktikan transport lokal menerima paket,
+        // BUKAN konfirmasi bahwa peer merespons atau rekonsiliasi selesai!
+        // Jangan mereset backoff dan jangan mengklaim rekonsiliasi sukses di sini.
+        final attemptId =
+            'reconcile-${session.sessionId}-${currentTime.microsecondsSinceEpoch}';
+        session.isAwaitingReconcileResponse = true;
+        session.activeReconcileAttemptId = attemptId;
+        session.reconcileAttemptTime = currentTime;
+
+        // Pasang timer batas waktu respons jika autoStartTimer aktif
+        _scheduler.scheduleResponseTimeout(
+          endpointId,
+          _scheduler.config.responseTimeout,
+          () => _handleReconcileResponseTimeout(endpointId, attemptId),
+        );
       } else {
-        _totalPeriodicReconcileFailures++;
+        _totalPeriodicSendFailures++;
+        session.clearReconcileAttempt();
         _recordReconciliationFailure(endpointId, session, currentTime);
       }
       return sent;
@@ -1454,12 +1612,117 @@ class DagGossipSyncEngine {
       debugPrint(
         '[DagGossipSyncEngine] Exception saat rekonsiliasi periodik ke $endpointId: $e',
       );
-      _totalPeriodicReconcileFailures++;
+      _totalPeriodicSendFailures++;
+      session.clearReconcileAttempt();
       _recordReconciliationFailure(endpointId, session, currentTime);
       return false;
     } finally {
       session.isReconciling = false;
     }
+  }
+
+  /// Menangani kedaluwarsa batas waktu respons rekonsiliasi periodik dari peer.
+  void _handleReconcileResponseTimeout(String endpointId, String attemptId) {
+    if (!_isEnabled || _isDisposed) return;
+    final session = _sessions[endpointId];
+    if (session == null) return;
+    if (session.isAwaitingReconcileResponse &&
+        session.activeReconcileAttemptId == attemptId) {
+      session.clearReconcileAttempt();
+      _scheduler.cancelResponseTimeout(endpointId);
+      _totalPeriodicReconcileTimeouts++;
+      _recordReconciliationFailure(endpointId, session, _nowProvider());
+    }
+  }
+
+  /// Memeriksa timeout percobaan rekonsiliasi yang belum menerima respons peer (Stage 5E.4.6.1).
+  ///
+  /// Peer yang tidak merespons dalam batas waktu [responseTimeout] akan dicatat kegagalannya
+  /// dan dijadwalkan backoff bertahap.
+  void checkReconciliationTimeouts([DateTime? now]) {
+    if (!_isEnabled || _isDisposed) return;
+    final currentTime = now ?? _nowProvider();
+    for (final entry in _sessions.entries) {
+      final endpointId = entry.key;
+      final session = entry.value;
+      if (session.isAwaitingReconcileResponse &&
+          session.reconcileAttemptTime != null &&
+          currentTime.difference(session.reconcileAttemptTime!) >=
+              _scheduler.config.responseTimeout) {
+        session.clearReconcileAttempt();
+        _scheduler.cancelResponseTimeout(endpointId);
+        _totalPeriodicReconcileTimeouts++;
+        _recordReconciliationFailure(endpointId, session, currentTime);
+      }
+    }
+  }
+
+  /// Memeriksa dan mengonfirmasi keberhasilan rekonsiliasi inventaris jika pesan yang masuk
+  /// merupakan respons valid dari peer yang sedang ditunggu (Stage 5E.4.6.1).
+  void _tryConfirmReconciliationFromPeer({
+    required String endpointId,
+    required PeerGossipSession session,
+    required DagGossipMessage message,
+    required DateTime receivedTime,
+  }) {
+    // 1. Sesi harus dalam status aktif menunggu respons rekonsiliasi
+    if (!session.isAwaitingReconcileResponse) {
+      return;
+    }
+
+    // 2. KEKETATAN PROTOKOL: DAG_SYNC_ACK HANYA memiliki semantik penerimaan blok,
+    //    TIDAK BOLEH digunakan sebagai bukti liveness atau konfirmasi rekonsiliasi inventaris!
+    if (message.type == DagGossipMessageType.syncAck) {
+      return;
+    }
+
+    // 3. Konfirmasi hanya sah jika jenis pesan mengindikasikan respons terhadap rekonsiliasi inventaris
+    //    (DAG_INV, DAG_GET_BLOCKS, atau DAG_REJECT)
+    final isReconciliationRelevantMessage =
+        message.type == DagGossipMessageType.inv ||
+        message.type == DagGossipMessageType.getBlocks ||
+        message.type == DagGossipMessageType.reject;
+    if (!isReconciliationRelevantMessage) {
+      return;
+    }
+
+    // 4. Verifikasi identitas pengirim: jika remoteNodeId sesi sudah tercatat,
+    //    senderNodeId pesan masuk WAJIB cocok persis (mencegah konfirmasi dari node asing/impostor)
+    if (session.remoteNodeId != null &&
+        session.remoteNodeId!.isNotEmpty &&
+        message.senderNodeId != session.remoteNodeId) {
+      debugPrint(
+        '[DagGossipSyncEngine] Mengabaikan konfirmasi rekonsiliasi dari $endpointId: '
+        'senderNodeId "${message.senderNodeId}" tidak cocok dengan remoteNodeId "${session.remoteNodeId}"',
+      );
+      return;
+    }
+
+    // 5. Verifikasi batas waktu (timeout): jika respons tiba setelah timeout berakhir,
+    //    percobaan sudah kedaluwarsa dan tidak boleh mengonfirmasi rekonsiliasi!
+    if (session.reconcileAttemptTime != null &&
+        receivedTime.difference(session.reconcileAttemptTime!) >=
+            _scheduler.config.responseTimeout) {
+      debugPrint(
+        '[DagGossipSyncEngine] Mengabaikan respons terlambat dari $endpointId: '
+        'tiba setelah timeout ${_scheduler.config.responseTimeout.inSeconds} detik terlewati',
+      );
+      session.clearReconcileAttempt();
+      _scheduler.cancelResponseTimeout(endpointId);
+      _totalPeriodicReconcileTimeouts++;
+      _recordReconciliationFailure(endpointId, session, receivedTime);
+      return;
+    }
+
+    // 6. Terkonfirmasi: Peer responsif dan rekonsiliasi inventaris berhasil
+    session.clearReconcileAttempt();
+    _scheduler.cancelResponseTimeout(endpointId);
+    session.lastReconcileConfirmedTime = receivedTime;
+
+    _totalPeriodicReconcileConfirmed++;
+
+    // Rekonsiliasi terkonfirmasi berhasil: pulihkan keadaan backoff dan jadwalkan tick berikutnya
+    _recordReconciliationSuccess(endpointId, session, receivedTime);
   }
 
   /// Mengirimkan pesan [DAG_INV] periodik ke peer tertentu.
@@ -1508,6 +1771,7 @@ class DagGossipSyncEngine {
     PeerGossipSession session,
     DateTime now,
   ) {
+    _scheduler.cancelResponseTimeout(endpointId);
     session.resetBackoff();
     session.lastPeriodicReconcileTime = now;
     final jitter = _scheduler.config.computeJitter(endpointId);
@@ -1522,6 +1786,7 @@ class DagGossipSyncEngine {
     PeerGossipSession session,
     DateTime now,
   ) {
+    _scheduler.cancelResponseTimeout(endpointId);
     session.consecutiveFailures++;
     final backoff = _scheduler.config.computeBackoff(
       session.consecutiveFailures,
@@ -1534,6 +1799,7 @@ class DagGossipSyncEngine {
 
   /// Menjalankan satu tick rekonsiliasi periodik secara eksplisit (untuk pengujian deterministik).
   Future<void> tickPeriodicReconciliation([DateTime? now]) async {
+    checkReconciliationTimeouts(now);
     await _scheduler.tick(now);
   }
 
@@ -1551,6 +1817,9 @@ class DagGossipSyncEngine {
     _isEnabled = false;
     _scheduler.dispose();
     _disposeListeners();
+    for (final session in _sessions.values) {
+      session.clearReconcileAttempt();
+    }
     _sessions.clear();
     orphanPool?.dispose();
   }

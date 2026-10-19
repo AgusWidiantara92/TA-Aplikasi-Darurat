@@ -60,6 +60,10 @@ const Duration kDefaultPeriodicGossipJitterRange = Duration(seconds: 5);
 /// Batas waktu kedaluwarsa permintaan blok aktif (in-flight request timeout) sebelum dianggap tidak merespons (15 detik).
 const Duration kGossipRequestTimeout = Duration(seconds: 15);
 
+/// Batas waktu kedaluwarsa respons peer terhadap rekonsiliasi inventaris periodik (Stage 5E.4.6.1).
+/// Peer yang tidak mengirim respons inventaris valid dalam 15 detik dianggap tidak merespons (unresponsive peer).
+const Duration kPeriodicGossipResponseTimeout = Duration(seconds: 15);
+
 /// Batas maksimum panjang karakter untuk pesan deskripsi alasan teknis (*reason*).
 /// Mencegah penyisipan teks bebas panjang yang dapat melanggar privasi korban/pengguna.
 const int kMaxMetadataReasonLength = 128;
