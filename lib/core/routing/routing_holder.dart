@@ -18,6 +18,7 @@ class ManetRoutingHolder {
   static DynamicTrustManager? _trustManager;
   static BlockdagSecurityCoordinator? _blockdagCoordinator;
   static bool _enableTrustRoutingPolicy = false;
+  static bool _enableBlockdagReplication = false;
 
   static MeshExperimentLogger get logger => _logger ??= MeshExperimentLogger();
 
@@ -50,6 +51,12 @@ class ManetRoutingHolder {
     _enableTrustRoutingPolicy = enable;
   }
 
+  static bool get enableBlockdagReplication => _enableBlockdagReplication;
+
+  static void setEnableBlockdagReplication(bool enable) {
+    _enableBlockdagReplication = enable;
+  }
+
   static ManetRoutingEngine get instance {
     return _instance ??= ManetRoutingEngine(
       transport: MeshTransportHolder.instance,
@@ -78,5 +85,6 @@ class ManetRoutingHolder {
     _blockdagCoordinator?.dispose();
     _blockdagCoordinator = null;
     _enableTrustRoutingPolicy = false;
+    _enableBlockdagReplication = false;
   }
 }
