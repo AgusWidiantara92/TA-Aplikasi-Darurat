@@ -32,6 +32,15 @@ const int kMaxTipHashes = 16;
 /// Batas maksimum jumlah blok yang dapat dimuat dalam satu pesan [DAG_BLOCK_BATCH].
 const int kMaxBlocksPerBatch = 4;
 
+/// Batas maksimum jumlah blok yatim (*orphan blocks*) yang dapat ditahan dalam pool sementara (Stage 5E.4.5).
+const int kMaxOrphanBlocks = 20;
+
+/// Batas waktu retensi blok yatim (*orphan block TTL*) sebelum kedaluwarsa (60 detik).
+const Duration kOrphanBlockTtl = Duration(seconds: 60);
+
+/// Batas maksimum blok yatim yang dapat ditahan dari satu peer tertentu.
+const int kMaxOrphansPerPeer = 8;
+
 /// Batas maksimum panjang karakter untuk identifier (NodeId, RequestId).
 const int kMaxIdentifierLength = 64;
 

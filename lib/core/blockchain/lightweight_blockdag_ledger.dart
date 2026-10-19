@@ -197,8 +197,19 @@ class LightweightBlockdagLedger {
     return block;
   }
 
-  /// Memvalidasi integritas, format hash, rantai parent, Merkle root, dan keunikan event suatu blok.
-  LedgerValidationResult validateBlock(SecurityBlock block) {
+  /// Memvalidasi integritas intrinsik blok tanpa bergantung pada keberadaan parent di ledger (Stage 5E.4.5).
+  ///
+  /// Memeriksa:
+  /// 1. Versi skema blok ([block.version] == 1).
+  /// 2. Format hash SHA-256 (64 hex lowercase) pada `blockHash` dan `merkleRoot`.
+  /// 3. Struktur indeks non-negatif dan relasi parent dasar (genesis tanpa parent, non-genesis wajib punya parent).
+  /// 4. Pencegahan siklus langsung terhadap diri sendiri (parentHash == blockHash).
+  /// 5. Pemeriksaan duplikasi blok terhadap ledger (`_processedBlockHashes`).
+  /// 6. Verifikasi re-komputasi Merkle root kriptografis.
+  /// 7. Verifikasi re-komputasi Header hash kriptografis SHA-256.
+  /// 8. Pemeriksaan keunikan eventId di dalam blok dan terhadap ledger (`_processedEventIds`).
+  /// 9. Batas waktu ke masa depan (future drift).
+  LedgerValidationResult validateBlockIntrinsic(SecurityBlock block) {
     // 1. Validasi versi skema
     if (block.version != 1) {
       return const LedgerValidationResult.invalid(
@@ -222,7 +233,7 @@ class LightweightBlockdagLedger {
       );
     }
 
-    // 3. Validasi struktur index dan relasi parent
+    // 3. Validasi struktur index dan relasi parent dasar
     if (block.index < 0) {
       return const LedgerValidationResult.invalid(
         LedgerValidationStatus.invalidStructure,
@@ -245,15 +256,7 @@ class LightweightBlockdagLedger {
       }
     }
 
-    // 4. Pemeriksaan duplikasi blok
-    if (_processedBlockHashes.contains(block.blockHash)) {
-      return const LedgerValidationResult.invalid(
-        LedgerValidationStatus.duplicateBlock,
-        'Blok dengan hash ini sudah pernah dicatat di ledger',
-      );
-    }
-
-    // 5. Validasi eksistensi parent block di ledger aktif atau checkpoint, serta pencegahan siklus (DAG acyclicity)
+    // 4. Pencegahan siklus langsung terhadap diri sendiri
     for (final parentHash in block.parentBlockHashes) {
       if (parentHash == block.blockHash) {
         return const LedgerValidationResult.invalid(
@@ -261,27 +264,14 @@ class LightweightBlockdagLedger {
           'Blok tidak boleh mereferensikan dirinya sendiri (siklus terdeteksi)',
         );
       }
+    }
 
-      final parentInActive = _blocks[parentHash];
-      final existsInCheckpoints = _checkpoints.any(
-        (c) =>
-            c.retainedGenesisHash == parentHash ||
-            c.prunedBlockHashes.contains(parentHash),
+    // 5. Pemeriksaan duplikasi blok terhadap ledger
+    if (_processedBlockHashes.contains(block.blockHash)) {
+      return const LedgerValidationResult.invalid(
+        LedgerValidationStatus.duplicateBlock,
+        'Blok dengan hash ini sudah pernah dicatat di ledger',
       );
-      if (parentInActive == null && !existsInCheckpoints) {
-        return LedgerValidationResult.invalid(
-          LedgerValidationStatus.missingParent,
-          'Parent block $parentHash tidak ditemukan pada ledger atau checkpoint',
-        );
-      }
-
-      // Pastikan index blok strictly lebih besar dari index parent aktif (bukti formal graf DAG asiklik)
-      if (parentInActive != null && block.index <= parentInActive.index) {
-        return LedgerValidationResult.invalid(
-          LedgerValidationStatus.invalidStructure,
-          'Indeks blok (${block.index}) harus lebih besar dari indeks parent (${parentInActive.index})',
-        );
-      }
     }
 
     // 6. Verifikasi re-komputasi Merkle Root
@@ -321,7 +311,7 @@ class LightweightBlockdagLedger {
       }
     }
 
-    // 9. Validasi batas timestamp (tidak boleh mendahului parent atau melompat jauh ke masa depan)
+    // 9. Validasi batas timestamp masa depan (future drift)
     if (maxFutureDrift != null) {
       final now = DateTime.now().toUtc();
       if (block.timestamp.isAfter(now.add(maxFutureDrift!))) {
@@ -331,10 +321,44 @@ class LightweightBlockdagLedger {
         );
       }
     }
+
+    return const LedgerValidationResult.valid();
+  }
+
+  /// Memvalidasi integritas penuh suatu blok, termasuk ketersediaan dan relasi parent di ledger.
+  LedgerValidationResult validateBlock(SecurityBlock block) {
+    // 1. Jalankan validasi intrinsik terlebih dahulu
+    final intrinsicResult = validateBlockIntrinsic(block);
+    if (!intrinsicResult.isValid) {
+      return intrinsicResult;
+    }
+
+    // 2. Validasi eksistensi parent block di ledger aktif atau checkpoint, serta relasi parent-child
     for (final parentHash in block.parentBlockHashes) {
-      final parentBlock = _blocks[parentHash];
-      if (parentBlock != null &&
-          block.timestamp.isBefore(parentBlock.timestamp)) {
+      final parentInActive = _blocks[parentHash];
+      final existsInCheckpoints = _checkpoints.any(
+        (c) =>
+            c.retainedGenesisHash == parentHash ||
+            c.prunedBlockHashes.contains(parentHash),
+      );
+      if (parentInActive == null && !existsInCheckpoints) {
+        return LedgerValidationResult.invalid(
+          LedgerValidationStatus.missingParent,
+          'Parent block $parentHash tidak ditemukan pada ledger atau checkpoint',
+        );
+      }
+
+      // Pastikan index blok strictly lebih besar dari index parent aktif (bukti formal graf DAG asiklik)
+      if (parentInActive != null && block.index <= parentInActive.index) {
+        return LedgerValidationResult.invalid(
+          LedgerValidationStatus.invalidStructure,
+          'Indeks blok (${block.index}) harus lebih besar dari indeks parent (${parentInActive.index})',
+        );
+      }
+
+      // Pastikan timestamp blok tidak mendahului timestamp parent
+      if (parentInActive != null &&
+          block.timestamp.isBefore(parentInActive.timestamp)) {
         return const LedgerValidationResult.invalid(
           LedgerValidationStatus.timestampOutOfBounds,
           'Timestamp blok mendahului timestamp blok parent',

@@ -6,3 +6,4 @@ export 'gossip_messages.dart';
 export 'gossip_privacy_sanitizer.dart';
 export 'gossip_codec.dart';
 export 'gossip_sync_engine.dart';
+export 'orphan_block_pool.dart';

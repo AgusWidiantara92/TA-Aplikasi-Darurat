@@ -24,6 +24,7 @@ import 'gossip_codec.dart';
 import 'gossip_constants.dart';
 import 'gossip_messages.dart';
 import 'gossip_privacy_sanitizer.dart';
+import 'orphan_block_pool.dart';
 
 /// State sesi gossip untuk satu endpoint peer 1-hop aktif.
 class PeerGossipSession {
@@ -77,6 +78,7 @@ class DagGossipSyncEngine {
   final String localNodeId;
   final LightweightBlockdagLedger ledger;
   final BlockdagRepository? repository;
+  final OrphanBlockPool? orphanPool;
 
   bool _isEnabled = false;
   bool _isDisposed = false;
@@ -109,8 +111,11 @@ class DagGossipSyncEngine {
     required this.localNodeId,
     required this.ledger,
     this.repository,
+    OrphanBlockPool? orphanPool,
+    bool enableOrphanPool = false,
     bool isEnabled = false,
-  }) : _isEnabled = isEnabled {
+  }) : orphanPool = orphanPool ?? (enableOrphanPool ? OrphanBlockPool() : null),
+       _isEnabled = isEnabled {
     if (_isEnabled) {
       _initListeners();
     }
@@ -127,6 +132,7 @@ class DagGossipSyncEngine {
     } else {
       _disposeListeners();
       _sessions.clear();
+      orphanPool?.clear();
     }
   }
 
@@ -244,6 +250,10 @@ class DagGossipSyncEngine {
     } else if (event.status == PeerConnectionStatus.disconnected ||
         event.status == PeerConnectionStatus.rejected) {
       _sessions.remove(event.endpointId);
+      // Kebijakan Orphan Block Pool (Stage 5E.4.5):
+      // Pemutusan koneksi peer (disconnect) TIDAK serta-merta membuang blok yatim dari orphanPool.
+      // Blok yatim yang telah lolos validasi intrinsik tetap dipertahankan selama belum kedaluwarsa (TTL 60 detik)
+      // karena parent yang hilang dapat diterima dari peer lain atau saat koneksi pulih kembali.
     }
   }
 
@@ -615,22 +625,96 @@ class DagGossipSyncEngine {
         continue;
       }
 
-      // 4. Validasi aturan ledger (Merkle root, header hash, schema, DAG acyclicity, parent availability)
-      final addResult = ledger.acceptRemoteBlock(block);
-      if (addResult.isValid) {
-        tentativelyAcceptedBlocks.add(block);
-      } else {
+      // 4. Validasi intrinsik blok (format hash, kriptografi Merkle root & header hash, dsb.)
+      final intrinsicRes = ledger.validateBlockIntrinsic(block);
+      if (!intrinsicRes.isValid) {
         debugPrint(
-          '[DagGossipSyncEngine] Blok ${block.blockHash} ditolak oleh ledger: ${addResult.status} - ${addResult.message}',
+          '[DagGossipSyncEngine] Blok ${block.blockHash} gagal validasi intrinsik: ${intrinsicRes.status} - ${intrinsicRes.message}',
         );
         _totalRemoteBlocksRejected++;
         rejectedHashes.add(block.blockHash);
-        firstRejectCode ??= _mapLedgerStatusToRejectCode(addResult.status);
-        firstRejectMessage ??= addResult.message;
+        firstRejectCode ??= _mapLedgerStatusToRejectCode(intrinsicRes.status);
+        firstRejectMessage ??= intrinsicRes.message;
+        continue;
+      }
+
+      // 5. Validasi ketersediaan parent di ledger aktif atau checkpoint
+      final fullValRes = ledger.validateBlock(block);
+      if (fullValRes.isValid) {
+        // Parent lengkap dan valid: terima ke dalam ledger
+        final addResult = ledger.acceptRemoteBlock(block);
+        if (addResult.isValid) {
+          tentativelyAcceptedBlocks.add(block);
+        } else {
+          _totalRemoteBlocksRejected++;
+          rejectedHashes.add(block.blockHash);
+          firstRejectCode ??= _mapLedgerStatusToRejectCode(addResult.status);
+          firstRejectMessage ??= addResult.message;
+        }
+      } else if (fullValRes.status == LedgerValidationStatus.missingParent) {
+        final pool = orphanPool;
+        if (pool != null) {
+          // Blok valid secara intrinsik tapi satu atau lebih parent belum ada di ledger!
+          // Tahan di Orphan Block Pool (Stage 5E.4.5)
+          final missingParents = block.parentBlockHashes.where((p) {
+            final inActive = ledger.getBlock(p) != null;
+            final inCheckpoint = ledger.checkpoints.any(
+              (c) =>
+                  c.retainedGenesisHash == p || c.prunedBlockHashes.contains(p),
+            );
+            return !inActive && !inCheckpoint;
+          }).toSet();
+
+          final addResult = pool.add(
+            block: block,
+            missingParentHashes: missingParents,
+            peerEndpointId: endpointId,
+            requestId: batch.requestId,
+          );
+
+          if (addResult.isAdded) {
+            debugPrint(
+              '[DagGossipSyncEngine] Blok ${block.blockHash} ditahan di orphan pool (menunggu parent: $missingParents)',
+            );
+            // Tambahkan parent yang hilang ke missingBlockHashes sesi agar dapat diminta
+            session.missingBlockHashes.addAll(missingParents);
+            session.missingBlockHashes.remove(block.blockHash);
+          } else if (addResult.isDuplicate) {
+            session.missingBlockHashes.remove(block.blockHash);
+          } else {
+            // Pool penuh atau kuota per-peer habis
+            debugPrint(
+              '[DagGossipSyncEngine] Gagal menahan blok orphan ${block.blockHash}: ${addResult.status} - ${addResult.message}',
+            );
+            _totalRemoteBlocksRejected++;
+            rejectedHashes.add(block.blockHash);
+            firstRejectCode ??= DagRejectCode.invalidBlockStructure;
+            firstRejectMessage ??= addResult.message;
+          }
+        } else {
+          // Orphan pool nonaktif (mode default / backward-compatible Stage 5E.4.4):
+          // Blok dengan missing parent langsung ditolak
+          debugPrint(
+            '[DagGossipSyncEngine] Blok ${block.blockHash} ditolak karena missing parent (orphan pool nonaktif)',
+          );
+          _totalRemoteBlocksRejected++;
+          rejectedHashes.add(block.blockHash);
+          firstRejectCode ??= DagRejectCode.invalidBlockStructure;
+          firstRejectMessage ??= fullValRes.message;
+        }
+      } else {
+        // Pelanggaran aturan validasi lainnya (misal: index <= parent index atau timestamp mendahului parent)
+        debugPrint(
+          '[DagGossipSyncEngine] Blok ${block.blockHash} ditolak oleh ledger: ${fullValRes.status} - ${fullValRes.message}',
+        );
+        _totalRemoteBlocksRejected++;
+        rejectedHashes.add(block.blockHash);
+        firstRejectCode ??= _mapLedgerStatusToRejectCode(fullValRes.status);
+        firstRejectMessage ??= fullValRes.message;
       }
     }
 
-    // 5. Persistensikan state ke repository jika terdapat blok yang berhasil divalidasi
+    // 6. Persistensikan state ke repository jika terdapat blok yang berhasil divalidasi
     final confirmedAcceptedHashes = <String>[];
     bool persistSuccess = true;
 
@@ -680,6 +764,17 @@ class DagGossipSyncEngine {
       }
     }
 
+    // 7. Jika persistensi sukses, evaluasi dan proses orphan pool yang parent-nya baru saja tiba (Stage 5E.4.5)
+    if (persistSuccess) {
+      final promotedOrphans = await processOrphans(endpointId, session);
+      for (final orphan in promotedOrphans) {
+        // Jika orphan ini berasal dari batch yang sama (misal child diletakkan sebelum parent dalam batch)
+        if (batch.blocks.any((b) => b.blockHash == orphan.blockHash)) {
+          confirmedAcceptedHashes.add(orphan.blockHash);
+        }
+      }
+    }
+
     // Blok yang secara permanen ditolak oleh validasi ledger/privasi dibersihkan dari missingBlockHashes
     if (rejectedHashes.isNotEmpty) {
       session.missingBlockHashes.removeAll(rejectedHashes);
@@ -688,7 +783,7 @@ class DagGossipSyncEngine {
     // Bersihkan active request dari sesi peminta agar tidak terkunci
     session.clearActiveRequest();
 
-    // 6. Kirim respons konfirmasi (ACK) HANYA untuk blok yang benar-benar berhasil dipersistensikan
+    // 8. Kirim respons konfirmasi (ACK) HANYA untuk blok yang benar-benar berhasil dipersistensikan
     if (confirmedAcceptedHashes.isNotEmpty) {
       final tips = ledger.tipHashes.toList()..sort();
       final effectiveTips = tips.isEmpty
@@ -717,11 +812,117 @@ class DagGossipSyncEngine {
       if (sent) _totalRejectSent++;
     }
 
-    // 7. Jika persistensi sukses dan masih ada hash kandidat yang belum dimiliki, minta batch berikutnya.
+    // 9. Jika persistensi sukses dan masih ada hash kandidat yang belum dimiliki, minta batch berikutnya.
     // MENCEGAH INFINITE RETRY LOOP: Jangan memicu permintaan berikutnya jika penyimpanan lokal gagal!
     if (persistSuccess && session.missingBlockHashes.isNotEmpty) {
       await _sendGetBlocks(endpointId, session);
     }
+  }
+
+  /// Memproses ulang blok yatim di [orphanPool] yang seluruh parent-nya telah tersedia di ledger.
+  ///
+  /// Dilakukan secara berulang (*iterative resolution*) untuk menangani rantai orphan bertingkat
+  /// (misal: C menunggu B, B menunggu A).
+  Future<List<SecurityBlock>> processOrphans([
+    String? currentEndpointId,
+    PeerGossipSession? currentSession,
+  ]) async {
+    final pool = orphanPool;
+    if (pool == null) return const [];
+
+    final promotedBlocks = <SecurityBlock>[];
+
+    bool anyPromoted = true;
+    while (anyPromoted) {
+      anyPromoted = false;
+      final ready = pool.getReadyOrphans(ledger);
+      if (ready.isEmpty) break;
+
+      for (final entry in ready) {
+        final candidate = entry.block;
+
+        // 1. Validasi penuh terhadap ledger sekarang setelah parent seharusnya ada
+        final valRes = ledger.validateBlock(candidate);
+        if (!valRes.isValid) {
+          if (valRes.status == LedgerValidationStatus.missingParent) {
+            // Masih ada parent yang belum lengkap
+            continue;
+          }
+          // Ditolak permanen (misal: parent tiba tapi timestamp/indeks melanggar aturan DAG)
+          debugPrint(
+            '[DagGossipSyncEngine] Orphan ${candidate.blockHash} ditolak permanen: ${valRes.status} - ${valRes.message}',
+          );
+          pool.remove(candidate.blockHash);
+          _totalRemoteBlocksRejected++;
+          continue;
+        }
+
+        // 2. Simpan snapshot sebelum mutasi untuk jaminan rollback jika persistensi gagal
+        final preSnapshot = ledger.exportPersistedState();
+        final acceptRes = ledger.acceptRemoteBlock(candidate);
+        if (!acceptRes.isValid) {
+          pool.remove(candidate.blockHash);
+          _totalRemoteBlocksRejected++;
+          continue;
+        }
+
+        // 3. Persistensi ke repository
+        bool saved = true;
+        if (repository != null) {
+          try {
+            saved = await repository!.saveState(ledger.exportPersistedState());
+          } catch (e) {
+            saved = false;
+            debugPrint(
+              '[DagGossipSyncEngine] Exception saat repository.saveState() untuk orphan ${candidate.blockHash}: $e',
+            );
+          }
+        }
+
+        if (!saved) {
+          // ROLLBACK: Batalkan mutasi in-memory dan JANGAN hapus dari pool
+          // Blok tetap berada di orphan pool agar dapat dicoba lagi setelah storage pulih.
+          ledger.restoreFromPersistedState(preSnapshot);
+          return promotedBlocks;
+        }
+
+        // 4. Sukses diterima dan disimpan persisten
+        pool.remove(candidate.blockHash);
+        _totalRemoteBlocksAccepted++;
+        promotedBlocks.add(candidate);
+        anyPromoted = true;
+
+        // Perbarui missing dan known hashes pada sesi peer
+        final peerSession =
+            _sessions[entry.peerEndpointId] ??
+            (entry.peerEndpointId == currentEndpointId ? currentSession : null);
+        if (peerSession != null) {
+          peerSession.missingBlockHashes.remove(candidate.blockHash);
+          peerSession.knownPeerBlockHashes.add(candidate.blockHash);
+        }
+
+        // 5. Kirim DAG_SYNC_ACK jika orphan ini berasal dari request sebelumnya yang belum di-ACK
+        if (entry.requestId != null &&
+            entry.peerEndpointId.isNotEmpty &&
+            (currentSession == null ||
+                entry.requestId != currentSession.activeRequestId)) {
+          final tips = ledger.tipHashes.toList()..sort();
+          final effectiveTips = tips.isEmpty
+              ? [ledger.genesisBlock.blockHash]
+              : tips;
+          final orphanAck = DagSyncAckMessage(
+            senderNodeId: localNodeId,
+            requestId: entry.requestId!,
+            acceptedBlockHashes: [candidate.blockHash],
+            newTipHashes: effectiveTips,
+          );
+          final sent = await _sendMessage(entry.peerEndpointId, orphanAck);
+          if (sent) _totalSyncAckSent++;
+        }
+      }
+    }
+
+    return promotedBlocks;
   }
 
   /// Menangani konfirmasi penerimaan [DAG_SYNC_ACK] dari peer.
@@ -1008,5 +1209,6 @@ class DagGossipSyncEngine {
     _isEnabled = false;
     _disposeListeners();
     _sessions.clear();
+    orphanPool?.dispose();
   }
 }
