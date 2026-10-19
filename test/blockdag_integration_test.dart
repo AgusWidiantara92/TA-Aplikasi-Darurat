@@ -38,6 +38,9 @@ import 'package:siagamesh_app/core/transport/mesh_transport.dart';
 import 'package:siagamesh_app/core/trust/dynamic_trust_manager.dart';
 import 'package:siagamesh_app/core/trust/trust_types.dart';
 import 'package:siagamesh_app/features/chat/data/repositories/chat_repository.dart';
+import 'package:siagamesh_app/core/blockchain/gossip/gossip_codec.dart';
+import 'package:siagamesh_app/core/blockchain/gossip/gossip_messages.dart';
+import 'package:siagamesh_app/core/blockchain/gossip/gossip_sync_engine.dart';
 
 /// Fake repository yang sengaja gagal menulis untuk menguji toleransi kesalahan.
 class FailingBlockdagRepository implements BlockdagRepository {
@@ -1785,6 +1788,735 @@ void main() {
         expect(coord2.isInitialized, isTrue);
         expect(ledger2.activeBlocksCount, equals(2));
         expect(ledger2.processedEventIds, contains('v1-persisted-evt'));
+      },
+    );
+  });
+
+  group('STAGE 5E.4.4.2 — Repository Commit Integrity & Partial-Write Recovery', () {
+    test(
+      '35. First-time state save succeeds and creates active slot with valid checksum and envelope',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        final repo = LocalBlockdagRepository();
+        final emptyRes = await repo.loadResult();
+        expect(emptyRes.status, equals(BlockdagLoadStatus.empty));
+
+        final ledger = LightweightBlockdagLedger();
+        final state = ledger.exportPersistedState();
+
+        final saved = await repo.saveState(state);
+        expect(saved, isTrue);
+
+        final activeSlot = await repo.getActiveSlot();
+        expect(activeSlot, equals(LocalBlockdagRepository.slotA));
+
+        final prefs = await SharedPreferences.getInstance();
+        final rawEnvelope = prefs.getString(LocalBlockdagRepository.keySlotA);
+        expect(rawEnvelope, isNotNull);
+
+        final decodedEnv = jsonDecode(rawEnvelope!) as Map<String, dynamic>;
+        expect(decodedEnv['schemaVersion'], equals(1));
+        expect(decodedEnv['checksum'], isNotNull);
+        expect(decodedEnv['committedAt'], isNotNull);
+        expect(decodedEnv['state'], isNotNull);
+
+        // Verifikasi checksum SHA-256
+        final stateMap = Map<String, dynamic>.from(decodedEnv['state'] as Map);
+        final expectedChecksum = computeSha256(canonicalJsonEncode(stateMap));
+        expect(decodedEnv['checksum'], equals(expectedChecksum));
+
+        final loadRes = await repo.loadResult();
+        expect(loadRes.status, equals(BlockdagLoadStatus.success));
+        expect(loadRes.state, isNotNull);
+        expect(loadRes.state!.schemaVersion, equals(1));
+        expect(loadRes.state!.blocks.length, equals(1));
+      },
+    );
+
+    test(
+      '36. New state staged and committed cleanly with alternating dual slots',
+      () async {
+        final prefs = await SharedPreferences.getInstance();
+        final repo = LocalBlockdagRepository(preferences: prefs);
+        final ledger = LightweightBlockdagLedger();
+
+        // 1. Simpan State 1 (Genesis)
+        final saved1 = await repo.saveState(ledger.exportPersistedState());
+        expect(saved1, isTrue);
+        expect(
+          await repo.getActiveSlot(),
+          equals(LocalBlockdagRepository.slotA),
+        );
+
+        // 2. Buat blok baru dan simpan State 2
+        ledger.addPendingEvent(
+          SecurityAuditEvent(
+            eventId: 'evt-slot-switch-1',
+            eventType: AuditEventType.idsDetection,
+            observerNodeId: 'NODE-A',
+            targetNodeId: 'NODE-B',
+            timestamp: DateTime.now().toUtc(),
+            monotonicMicros: 1,
+            metadata: {'reason': 'test alternating slots'},
+          ),
+        );
+        ledger.createBlock(
+          creatorNodeId: 'NODE-A',
+          validationProof: {'test': true},
+        );
+        expect(ledger.activeBlocksCount, equals(2));
+
+        final saved2 = await repo.saveState(ledger.exportPersistedState());
+        expect(saved2, isTrue);
+        expect(
+          await repo.getActiveSlot(),
+          equals(LocalBlockdagRepository.slotB),
+        );
+
+        // Verifikasi Slot B sekarang aktif dan memuat 2 blok
+        final loadRes2 = await repo.loadResult();
+        expect(loadRes2.status, equals(BlockdagLoadStatus.success));
+        expect(loadRes2.state!.blocks.length, equals(2));
+
+        // Verifikasi Slot A masih menyimpan snapshot sebelumnya (Genesis 1 blok)
+        final rawSlotA = prefs.getString(LocalBlockdagRepository.keySlotA);
+        expect(rawSlotA, isNotNull);
+        final envA = jsonDecode(rawSlotA!) as Map<String, dynamic>;
+        final stateA = envA['state'] as Map<String, dynamic>;
+        expect((stateA['blocks'] as List).length, equals(1));
+
+        // 3. Simpan State 3 -> bergantian kembali ke Slot A
+        ledger.createBlock(
+          creatorNodeId: 'NODE-A',
+          validationProof: {'test': 3},
+        );
+        final saved3 = await repo.saveState(ledger.exportPersistedState());
+        expect(saved3, isTrue);
+        expect(
+          await repo.getActiveSlot(),
+          equals(LocalBlockdagRepository.slotA),
+        );
+        final loadRes3 = await repo.loadResult();
+        expect(loadRes3.state!.blocks.length, equals(3));
+      },
+    );
+
+    test(
+      '37. Staging write failure leaves old state valid and fully recoverable',
+      () async {
+        final prefs = await SharedPreferences.getInstance();
+        final repo = LocalBlockdagRepository(preferences: prefs);
+        final ledger = LightweightBlockdagLedger();
+
+        // Simpan State Awal (State 1)
+        final savedInit = await repo.saveState(ledger.exportPersistedState());
+        expect(savedInit, isTrue);
+        expect(
+          await repo.getActiveSlot(),
+          equals(LocalBlockdagRepository.slotA),
+        );
+
+        // Tambah blok untuk State 2
+        ledger.createBlock(
+          creatorNodeId: 'NODE-A',
+          validationProof: {'desc': 'State 2 block'},
+        );
+        expect(ledger.activeBlocksCount, equals(2));
+
+        // Simulasikan kegagalan penulisan staging slot
+        repo.simulateStagingWriteFailure = true;
+        final saveFailed = await repo.saveState(ledger.exportPersistedState());
+        expect(saveFailed, isFalse);
+
+        // Verifikasi pointer aktif TIDAK berubah (tetap slotA)
+        expect(
+          await repo.getActiveSlot(),
+          equals(LocalBlockdagRepository.slotA),
+        );
+
+        // Pulihkan simulasi dan baca dari repository
+        repo.simulateStagingWriteFailure = false;
+        final loadRes = await repo.loadResult();
+        expect(loadRes.status, equals(BlockdagLoadStatus.success));
+        expect(loadRes.state!.blocks.length, equals(1)); // Masih State 1
+        expect(repo.lastLoadCorrupted, isFalse);
+      },
+    );
+
+    test(
+      '38. Staging write succeeds but commit pointer update fails -> old state remains authoritative',
+      () async {
+        final prefs = await SharedPreferences.getInstance();
+        final repo = LocalBlockdagRepository(preferences: prefs);
+        final ledger = LightweightBlockdagLedger();
+
+        // Simpan State 1
+        await repo.saveState(ledger.exportPersistedState());
+        expect(
+          await repo.getActiveSlot(),
+          equals(LocalBlockdagRepository.slotA),
+        );
+
+        // Siapkan State 2
+        ledger.createBlock(
+          creatorNodeId: 'NODE-A',
+          validationProof: {'desc': 'State 2 block'},
+        );
+
+        // Staging berhasil tapi pointer update gagal
+        repo.simulatePointerCommitFailure = true;
+        final saveResult = await repo.saveState(ledger.exportPersistedState());
+        expect(saveResult, isFalse);
+
+        // Slot B tertulis secara staging di disk, TETAPI activeSlot tetap slotA
+        expect(prefs.getString(LocalBlockdagRepository.keySlotB), isNotNull);
+        expect(
+          await repo.getActiveSlot(),
+          equals(LocalBlockdagRepository.slotA),
+        );
+
+        // Pemuatan repository harus tetap mengembalikan State 1 (otoritatif)
+        repo.simulatePointerCommitFailure = false;
+        final loadRes = await repo.loadResult();
+        expect(loadRes.status, equals(BlockdagLoadStatus.success));
+        expect(loadRes.state!.blocks.length, equals(1));
+        expect(repo.lastLoadCorrupted, isFalse);
+      },
+    );
+
+    test(
+      '39. Exceptions during disk write boundaries caught safely without corrupting old state',
+      () async {
+        final prefs = await SharedPreferences.getInstance();
+        final repo = LocalBlockdagRepository(preferences: prefs);
+        final ledger = LightweightBlockdagLedger();
+
+        // Simpan State 1
+        await repo.saveState(ledger.exportPersistedState());
+        expect(
+          await repo.getActiveSlot(),
+          equals(LocalBlockdagRepository.slotA),
+        );
+
+        // Siapkan State 2 dan picu exception I/O
+        ledger.createBlock(
+          creatorNodeId: 'NODE-A',
+          validationProof: {'desc': 'State 2 block'},
+        );
+        repo.simulateSaveException = true;
+
+        // Exception dilempar dan ditangkap aman oleh caller
+        bool exceptionThrown = false;
+        try {
+          await repo.saveState(ledger.exportPersistedState());
+        } catch (_) {
+          exceptionThrown = true;
+        }
+        expect(exceptionThrown, isTrue);
+
+        // Pulihkan repository dan periksa integritas disk
+        repo.simulateSaveException = false;
+        final loadRes = await repo.loadResult();
+        expect(loadRes.status, equals(BlockdagLoadStatus.success));
+        expect(loadRes.state!.blocks.length, equals(1));
+        expect(repo.lastLoadCorrupted, isFalse);
+      },
+    );
+
+    test(
+      '40. Reload after each write failure recovers old snapshot or gives explicit status',
+      () async {
+        final prefs = await SharedPreferences.getInstance();
+        final repo = LocalBlockdagRepository(preferences: prefs);
+        final ledger = LightweightBlockdagLedger();
+
+        await repo.saveState(ledger.exportPersistedState());
+
+        // Siklus Kegagalan 1: Storage unavailable
+        repo.simulateStorageUnavailable = true;
+        var loadRes = await repo.loadResult();
+        expect(loadRes.status, equals(BlockdagLoadStatus.storageUnavailable));
+        expect(repo.lastLoadCorrupted, isFalse);
+        repo.simulateStorageUnavailable = false;
+
+        // Pulih: State 1 terbaca
+        loadRes = await repo.loadResult();
+        expect(loadRes.status, equals(BlockdagLoadStatus.success));
+        expect(loadRes.state!.blocks.length, equals(1));
+
+        // Siklus Kegagalan 2: Staging failure
+        repo.simulateStagingWriteFailure = true;
+        ledger.createBlock(creatorNodeId: 'NODE-A', validationProof: {'x': 1});
+        final failedSave2 = await repo.saveState(ledger.exportPersistedState());
+        expect(failedSave2, isFalse);
+        repo.simulateStagingWriteFailure = false;
+
+        // Pulih: State 1 tetap terbaca
+        loadRes = await repo.loadResult();
+        expect(loadRes.status, equals(BlockdagLoadStatus.success));
+        expect(loadRes.state!.blocks.length, equals(1));
+
+        // Siklus Kegagalan 3: Pointer commit failure
+        repo.simulatePointerCommitFailure = true;
+        final failedSave3 = await repo.saveState(ledger.exportPersistedState());
+        expect(failedSave3, isFalse);
+        repo.simulatePointerCommitFailure = false;
+
+        // Pulih: State 1 tetap terbaca
+        loadRes = await repo.loadResult();
+        expect(loadRes.status, equals(BlockdagLoadStatus.success));
+        expect(loadRes.state!.blocks.length, equals(1));
+      },
+    );
+
+    test(
+      '41. Mismatched schemaVersion, tampered payload, or checksum mismatch never accepted',
+      () async {
+        final ledger = LightweightBlockdagLedger();
+        final stateMap = ledger.exportPersistedState().toMap();
+        final validChecksum = computeSha256(canonicalJsonEncode(stateMap));
+
+        // 1. Ketidakcocokan versi skema antara envelope (1) dan isi state (2)
+        SharedPreferences.setMockInitialValues({
+          LocalBlockdagRepository.keyActiveSlot: LocalBlockdagRepository.slotA,
+          LocalBlockdagRepository.keySlotA: jsonEncode({
+            'schemaVersion': 1,
+            'state': {...stateMap, 'schemaVersion': 2},
+            'checksum': validChecksum,
+            'committedAt': DateTime.now().toUtc().toIso8601String(),
+          }),
+        });
+        var repo = LocalBlockdagRepository();
+        var loadRes = await repo.loadResult();
+        expect(loadRes.status, equals(BlockdagLoadStatus.corruptedData));
+        expect(loadRes.errorMessage, contains('Ketidakcocokan versi skema'));
+        expect(repo.lastLoadCorrupted, isTrue);
+
+        // 2. Tampered checksum (checksum tidak cocok dengan payload)
+        SharedPreferences.setMockInitialValues({
+          LocalBlockdagRepository.keyActiveSlot: LocalBlockdagRepository.slotA,
+          LocalBlockdagRepository.keySlotA: jsonEncode({
+            'schemaVersion': 1,
+            'state': stateMap,
+            'checksum':
+                'bad000000000000000000000000000000000000000000000000000000000dead',
+            'committedAt': DateTime.now().toUtc().toIso8601String(),
+          }),
+        });
+        repo = LocalBlockdagRepository();
+        loadRes = await repo.loadResult();
+        expect(loadRes.status, equals(BlockdagLoadStatus.corruptedData));
+        expect(
+          loadRes.errorMessage,
+          contains('Integritas checksum slot aktif gagal'),
+        );
+        expect(repo.lastLoadCorrupted, isTrue);
+
+        // 3. Ketidakcocokan dengan keySchemaVersion pada preferences
+        SharedPreferences.setMockInitialValues({
+          LocalBlockdagRepository.keyActiveSlot: LocalBlockdagRepository.slotA,
+          LocalBlockdagRepository.keySchemaVersion: 99, // Mismatched
+          LocalBlockdagRepository.keySlotA: jsonEncode({
+            'schemaVersion': 1,
+            'state': stateMap,
+            'checksum': validChecksum,
+            'committedAt': DateTime.now().toUtc().toIso8601String(),
+          }),
+        });
+        repo = LocalBlockdagRepository();
+        loadRes = await repo.loadResult();
+        expect(loadRes.status, equals(BlockdagLoadStatus.corruptedData));
+        expect(
+          loadRes.errorMessage,
+          contains('Ketidakcocokan versi skema antara metadata preference'),
+        );
+        expect(repo.lastLoadCorrupted, isTrue);
+      },
+    );
+
+    test(
+      '42. Unsupported schemaVersion in dual-slot preserved without Genesis overwrite',
+      () async {
+        final ledger = LightweightBlockdagLedger();
+        final stateMap = {
+          ...ledger.exportPersistedState().toMap(),
+          'schemaVersion': 2,
+        };
+        final checksum = computeSha256(canonicalJsonEncode(stateMap));
+        final preservedSlotJson = jsonEncode({
+          'schemaVersion': 2,
+          'state': stateMap,
+          'checksum': checksum,
+          'committedAt': DateTime.now().toUtc().toIso8601String(),
+        });
+
+        SharedPreferences.setMockInitialValues({
+          LocalBlockdagRepository.keyActiveSlot: LocalBlockdagRepository.slotA,
+          LocalBlockdagRepository.keySlotA: preservedSlotJson,
+          LocalBlockdagRepository.keySchemaVersion: 2,
+        });
+
+        final repo = LocalBlockdagRepository();
+        final loadRes = await repo.loadResult();
+        expect(loadRes.status, equals(BlockdagLoadStatus.unsupportedVersion));
+        expect(loadRes.detectedSchemaVersion, equals(2));
+        expect(repo.lastLoadCorrupted, isFalse);
+
+        final coordLedger = LightweightBlockdagLedger();
+        final coordinator = BlockdagSecurityCoordinator(
+          localNodeId: 'NODE-A',
+          ledger: coordLedger,
+          repository: repo,
+        );
+
+        final initStatus = await coordinator.initialize();
+        expect(initStatus, equals(BlockdagInitStatus.unsupportedVersionHalted));
+        expect(coordinator.isInitialized, isFalse);
+
+        // Verifikasi slot tetap utuh di disk dan tidak tertimpa Genesis baru
+        final prefs = await SharedPreferences.getInstance();
+        expect(
+          prefs.getString(LocalBlockdagRepository.keySlotA),
+          equals(preservedSlotJson),
+        );
+        expect(
+          prefs.getString(LocalBlockdagRepository.keyActiveSlot),
+          equals(LocalBlockdagRepository.slotA),
+        );
+      },
+    );
+
+    test(
+      '43. Corrupted state strictly distinguished from storage unavailable in dual-slot storage',
+      () async {
+        // Kasus A: Korupsi data JSON pada active slot
+        SharedPreferences.setMockInitialValues({
+          LocalBlockdagRepository.keyActiveSlot: LocalBlockdagRepository.slotA,
+          LocalBlockdagRepository.keySlotA:
+              '{"schemaVersion": 1, corrupted_json...',
+        });
+        final corruptRepo = LocalBlockdagRepository();
+        final corruptRes = await corruptRepo.loadResult();
+        expect(corruptRes.status, equals(BlockdagLoadStatus.corruptedData));
+        expect(corruptRes.isCorrupted, isTrue);
+        expect(corruptRepo.lastLoadCorrupted, isTrue);
+
+        // Kasus B: Storage unavailable (bukan korupsi)
+        final offlineRepo = LocalBlockdagRepository(
+          simulateStorageUnavailable: true,
+        );
+        final offlineRes = await offlineRepo.loadResult();
+        expect(
+          offlineRes.status,
+          equals(BlockdagLoadStatus.storageUnavailable),
+        );
+        expect(offlineRes.isStorageUnavailable, isTrue);
+        expect(offlineRepo.lastLoadCorrupted, isFalse); // Jelas bukan korupsi
+      },
+    );
+
+    test(
+      '44. Commit retry after recovery succeeds cleanly without duplicate blocks or events',
+      () async {
+        final prefs = await SharedPreferences.getInstance();
+        final repo = LocalBlockdagRepository(preferences: prefs);
+        final ledger = LightweightBlockdagLedger();
+
+        // 1. Simpan State 1
+        await repo.saveState(ledger.exportPersistedState());
+
+        // 2. Tambah event dan buat Block 1
+        final event = SecurityAuditEvent(
+          eventId: 'retry-dedup-evt-1',
+          eventType: AuditEventType.idsDetection,
+          observerNodeId: 'NODE-A',
+          targetNodeId: 'NODE-B',
+          timestamp: DateTime.now().toUtc(),
+          monotonicMicros: 1,
+          metadata: {'metric': 'test'},
+        );
+        ledger.addPendingEvent(event);
+        final block1 = ledger.createBlock(
+          creatorNodeId: 'NODE-A',
+          validationProof: {'test': true},
+        );
+        expect(ledger.activeBlocksCount, equals(2));
+
+        // 3. Simulasikan kegagalan pointer commit
+        repo.simulatePointerCommitFailure = true;
+        final failSave = await repo.saveState(ledger.exportPersistedState());
+        expect(failSave, isFalse);
+
+        // 4. Pulihkan storage dan lakukan retry commit
+        repo.simulatePointerCommitFailure = false;
+        final retrySave = await repo.saveState(ledger.exportPersistedState());
+        expect(retrySave, isTrue);
+
+        // 5. Muat ulang dan periksa integritas: tidak ada duplikasi blok atau event
+        final loadRes = await repo.loadResult();
+        expect(loadRes.status, equals(BlockdagLoadStatus.success));
+        final reloaded = loadRes.state!;
+        expect(reloaded.blocks.length, equals(2));
+        expect(
+          reloaded.blocks.map((b) => b.blockHash).toSet().length,
+          equals(2),
+        );
+        expect(reloaded.processedEventIds.length, equals(1));
+        expect(reloaded.processedEventIds.first, equals('retry-dedup-evt-1'));
+        expect(reloaded.tipHashes, equals([block1.blockHash]));
+      },
+    );
+
+    test(
+      '45. DagGossipSyncEngine never sends ACK for unpersisted blocks when repository write fails',
+      () async {
+        final prefs = await SharedPreferences.getInstance();
+        final repoB = LocalBlockdagRepository(preferences: prefs);
+
+        final ledgerA = LightweightBlockdagLedger();
+        final ledgerB = LightweightBlockdagLedger();
+        final transportB = FakeMeshTransport();
+
+        final engineB = DagGossipSyncEngine(
+          transport: transportB,
+          localNodeId: 'NODE-B',
+          ledger: ledgerB,
+          repository: repoB,
+          isEnabled: true,
+        );
+
+        // Buat blok pada ledger A
+        final event = SecurityAuditEvent(
+          eventId: 'gossip-pers-fail-evt-1',
+          eventType: AuditEventType.idsDetection,
+          observerNodeId: 'NODE-A',
+          targetNodeId: 'NODE-C',
+          timestamp: DateTime.now().toUtc(),
+          monotonicMicros: 1,
+          metadata: {'obs': 'unconfirmed'},
+        );
+        ledgerA.addPendingEvent(event);
+        final blockA1 = ledgerA.createBlock(
+          creatorNodeId: 'NODE-A',
+          validationProof: {'creator': 'NODE-A'},
+        );
+
+        // Hubungkan transport B dengan peer 'ep-a'
+        transportB.simulateIncomingConnectionRequest(
+          endpointId: 'ep-a',
+          endpointName: 'Node A',
+        );
+        await transportB.acceptConnection(endpointId: 'ep-a');
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        final sessionB = engineB.getSession('ep-a')!;
+        sessionB.activeRequestId = 'req-unpersisted-ack-1';
+        sessionB.missingBlockHashes.add(blockA1.blockHash);
+
+        // Simulasikan kegagalan staging penulisan pada repository node B
+        repoB.simulateStagingWriteFailure = true;
+
+        transportB.clearSentPayloads();
+        transportB.simulateIncomingPayload(
+          endpointId: 'ep-a',
+          bytes: DagGossipCodec.encode(
+            DagBlockBatchMessage(
+              senderNodeId: 'NODE-A',
+              requestId: 'req-unpersisted-ack-1',
+              batchIndex: 1,
+              totalBatches: 1,
+              blocks: [blockA1],
+            ),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        // Engine B TIDAK mengirimkan DAG_SYNC_ACK
+        expect(engineB.totalSyncAckSent, equals(0));
+        final sentAcks = transportB.sentPayloads
+            .map((p) => DagGossipCodec.decode(p.bytes).message)
+            .whereType<DagSyncAckMessage>()
+            .toList();
+        expect(sentAcks, isEmpty);
+
+        engineB.dispose();
+      },
+    );
+
+    test(
+      '46. Remote batch save failure leaves both ledger in-memory and repository on-disk consistent',
+      () async {
+        final prefs = await SharedPreferences.getInstance();
+        final repoB = LocalBlockdagRepository(preferences: prefs);
+        final ledgerB = LightweightBlockdagLedger();
+        final transportB = FakeMeshTransport();
+
+        // Simpan Genesis di disk terlebih dahulu
+        await repoB.saveState(ledgerB.exportPersistedState());
+
+        final engineB = DagGossipSyncEngine(
+          transport: transportB,
+          localNodeId: 'NODE-B',
+          ledger: ledgerB,
+          repository: repoB,
+          isEnabled: true,
+        );
+
+        final ledgerA = LightweightBlockdagLedger();
+        final blockA1 = ledgerA.createBlock(
+          creatorNodeId: 'NODE-A',
+          validationProof: {'test': true},
+        );
+
+        transportB.simulateIncomingConnectionRequest(
+          endpointId: 'ep-a',
+          endpointName: 'Node A',
+        );
+        await transportB.acceptConnection(endpointId: 'ep-a');
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        final sessionB = engineB.getSession('ep-a')!;
+        sessionB.activeRequestId = 'req-consistency-12';
+        sessionB.missingBlockHashes.add(blockA1.blockHash);
+
+        // Kegagalan penulisan disk pointer commit
+        repoB.simulatePointerCommitFailure = true;
+
+        transportB.simulateIncomingPayload(
+          endpointId: 'ep-a',
+          bytes: DagGossipCodec.encode(
+            DagBlockBatchMessage(
+              senderNodeId: 'NODE-A',
+              requestId: 'req-consistency-12',
+              batchIndex: 1,
+              totalBatches: 1,
+              blocks: [blockA1],
+            ),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        // 1. Verifikasi in-memory ledger: di-rollback sempurna
+        expect(ledgerB.activeBlocksCount, equals(1));
+        expect(
+          ledgerB.processedBlockHashes.contains(blockA1.blockHash),
+          isFalse,
+        );
+        expect(ledgerB.tipHashes, equals([ledgerB.genesisBlock.blockHash]));
+
+        // 2. Verifikasi on-disk repository: tetap konsisten pada Genesis
+        repoB.simulatePointerCommitFailure = false;
+        final diskRes = await repoB.loadResult();
+        expect(diskRes.status, equals(BlockdagLoadStatus.success));
+        expect(diskRes.state!.blocks.length, equals(1));
+        expect(
+          diskRes.state!.blocks.first.blockHash,
+          equals(ledgerB.genesisBlock.blockHash),
+        );
+
+        engineB.dispose();
+      },
+    );
+
+    test(
+      '47. Old state restored accurately after restart through repository (not just in RAM)',
+      () async {
+        final sharedPrefs = await SharedPreferences.getInstance();
+        final repo1 = LocalBlockdagRepository(preferences: sharedPrefs);
+        final ledger1 = LightweightBlockdagLedger();
+        final coord1 = BlockdagSecurityCoordinator(
+          localNodeId: 'NODE-A',
+          ledger: ledger1,
+          repository: repo1,
+          config: const BlockdagBatchConfig(maxBatchSize: 1),
+        );
+        await coord1.initialize();
+
+        await coord1.processIdsDetectionEvent(
+          IdsDetectionEvent(
+            eventId: 'restart-stage5e442-evt',
+            runId: 'RUN-RESTART',
+            observerNodeId: 'NODE-A',
+            targetNodeId: 'NODE-B',
+            status: NodeDetectionStatus.suspected,
+            observedDropRate: 0.75,
+            totalExpected: 8,
+            totalClaimed: 2,
+            totalUnconfirmed: 6,
+            totalLinkFailures: 0,
+            totalProtocolDrops: 0,
+            reason: 'Restart durability verification',
+            timestamp: DateTime.now().toUtc(),
+            monotonicMicros: 777,
+          ),
+        );
+
+        final expectedTip = ledger1.tipHashes.first;
+        coord1.dispose();
+
+        // Simulasikan app kill & restart: alokasikan instance baru di memori
+        final repo2 = LocalBlockdagRepository(preferences: sharedPrefs);
+        final ledger2 = LightweightBlockdagLedger();
+        final coord2 = BlockdagSecurityCoordinator(
+          localNodeId: 'NODE-A',
+          ledger: ledger2,
+          repository: repo2,
+        );
+
+        final initStatus = await coord2.initialize();
+        expect(initStatus, equals(BlockdagInitStatus.restoredFromStorage));
+        expect(coord2.isInitialized, isTrue);
+        expect(ledger2.activeBlocksCount, equals(2));
+        expect(ledger2.tipHashes, contains(expectedTip));
+        expect(ledger2.processedEventIds, contains('restart-stage5e442-evt'));
+
+        coord2.dispose();
+      },
+    );
+
+    test(
+      '48. Backward compatibility with legacy format and migration to dual-slot on subsequent save',
+      () async {
+        final ledger = LightweightBlockdagLedger();
+        final legacyState = ledger.exportPersistedState();
+        final legacyJson = jsonEncode(legacyState.toMap());
+
+        // Inisialisasi storage hanya dengan kunci legacy (tanpa dual-slot)
+        SharedPreferences.setMockInitialValues({
+          LocalBlockdagRepository.keyState: legacyJson,
+          LocalBlockdagRepository.keySchemaVersion: 1,
+        });
+
+        final repo = LocalBlockdagRepository();
+
+        // 1. loadResult() memuat data legacy secara transparan
+        final initialLoad = await repo.loadResult();
+        expect(initialLoad.status, equals(BlockdagLoadStatus.success));
+        expect(initialLoad.state!.blocks.length, equals(1));
+        expect(
+          await repo.getActiveSlot(),
+          isNull,
+        ); // Belum termigrasi ke dual-slot
+
+        // 2. Simpan state baru -> termigrasi otomatis ke dual-slot
+        ledger.createBlock(
+          creatorNodeId: 'NODE-A',
+          validationProof: {'migrated': true},
+        );
+        final saved = await repo.saveState(ledger.exportPersistedState());
+        expect(saved, isTrue);
+
+        // Verifikasi telah termigrasi ke slotA
+        expect(
+          await repo.getActiveSlot(),
+          equals(LocalBlockdagRepository.slotA),
+        );
+
+        // 3. Pemuatan berikutnya menggunakan envelope dual-slot dengan checksum SHA-256
+        final migratedLoad = await repo.loadResult();
+        expect(migratedLoad.status, equals(BlockdagLoadStatus.success));
+        expect(migratedLoad.state!.blocks.length, equals(2));
+        expect(repo.lastLoadCorrupted, isFalse);
       },
     );
   });
