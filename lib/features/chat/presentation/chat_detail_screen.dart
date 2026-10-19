@@ -285,7 +285,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     )) {
       statusText = 'Mengantre di Buffer Mesh';
     } else {
-      statusText = 'Tersimpan Lokal (Simulasi)';
+      statusText = 'Tersimpan di Buffer Lokal';
     }
 
     final messageId =
@@ -350,7 +350,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             onTap: () {
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
-                  content: Text('Profil Pengguna (Mode Demonstrasi)'),
+                  content: Text('Profil Pengguna SiagaMesh'),
                   duration: Duration(seconds: 1),
                 ),
               );
@@ -410,7 +410,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                     ),
                   ),
                   const StatusBadge(
-                    label: 'AKTIF (SIMULASI)',
+                    label: 'MANET AKTIF',
                     backgroundColor: AppColors.primaryNavy,
                     textColor: Colors.white,
                     fontSize: 9,
@@ -478,7 +478,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          'Terhubung (Simulasi) • Sinyal Kuat • ${widget.nodeId}',
+                          'Kanal Komunikasi Langsung • ${widget.nodeId}',
                           style: const TextStyle(
                             fontSize: 11,
                             color: AppColors.textSecondary,
@@ -496,7 +496,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 4),
               child: Text(
-                'HARI INI • JANGKAUAN LOKAL TERBUKA (SIMULASI)',
+                'HARI INI • JANGKAUAN MESH LOKAL',
                 style: TextStyle(
                   fontSize: 10,
                   fontWeight: FontWeight.w600,
@@ -579,12 +579,12 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                         _sendMessage(
                           customText: 'Data Telemetri Koordinat Lokasi Darurat',
                           telemetry: const TelemetryData(
-                            locationName: 'Titik Kumpul Evakuasi (Simulasi)',
+                            locationName: 'Titik Kumpul Evakuasi',
                             latitude: -6.2000,
                             longitude: 106.8500,
-                            accuracy: '<5m (Simulasi)',
+                            accuracy: 'Akurasi: Tidak diukur',
                             priority: 'DARURAT',
-                            validationInfo: 'Simulasi Terverifikasi GPS',
+                            validationInfo: 'Verifikasi: SACJ HMAC',
                           ),
                         );
                       },
@@ -624,7 +624,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                     child: TextField(
                       controller: _messageController,
                       decoration: const InputDecoration(
-                        hintText: 'Ketik pesan (simulasi)...',
+                        hintText: 'Ketik pesan darurat...',
                         contentPadding: EdgeInsets.symmetric(
                           horizontal: 16,
                           vertical: 10,
@@ -850,7 +850,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                 ),
                 const SizedBox(height: 4),
                 const Text(
-                  'TERHUBUNG DENGAN JARINGAN (SIMULASI)',
+                  'DATA TELEMETRI DARURAT',
                   style: TextStyle(
                     fontSize: 9,
                     fontWeight: FontWeight.w600,

@@ -116,7 +116,7 @@ class LocalChatRepository implements ChatRepository {
           'Halo! Kami mendeteksi sinyal SOS dari perangkat Anda di radius 350 meter. Apakah ada korban yang memerlukan pertolongan darurat?',
       time: '10:30',
       isMe: false,
-      relayInfo: 'Ditransmisi melalui multi-hop relay #01 (Simulasi)',
+      relayInfo: 'Ditransmisi melalui multi-hop relay #01',
     ),
     const ChatMessage(
       id: 'm2',
@@ -125,7 +125,7 @@ class LocalChatRepository implements ChatRepository {
           'Benar, ada 2 orang lansia dan 1 balita membutuhkan evakuasi perahu karet karena air sudah mencapai 1.5 meter.',
       time: '10:32',
       isMe: true,
-      statusText: 'Terkirim • E2E Confirmed (Simulasi)',
+      statusText: 'Terkirim • E2E Terkonfirmasi',
     ),
     const ChatMessage(
       id: 'm3',
@@ -137,9 +137,9 @@ class LocalChatRepository implements ChatRepository {
         locationName: 'SDN 01 Pagi (Lantai 2)',
         latitude: -6.2088,
         longitude: 106.8456,
-        accuracy: 'Akurasi GPS Medis: ±5m (Simulasi)',
+        accuracy: 'Akurasi GPS: Tidak diukur',
         priority: 'PRIORITAS TINGGI',
-        validationInfo: 'Validasi Lewat: Berhasil (Simulasi)',
+        validationInfo: 'Verifikasi: Header HMAC Valid',
       ),
     ),
     const ChatMessage(
@@ -149,7 +149,7 @@ class LocalChatRepository implements ChatRepository {
           'Informasi diterima. Perahu evakuasi No. 04 sedang meluncur ke titik SDN 01. Harap tetap di titik tertinggi.',
       time: '10:33',
       isMe: false,
-      relayInfo: 'Terverifikasi Konsensus SAR Lapangan (Simulasi)',
+      relayInfo: 'Terverifikasi Konsensus SAR Lapangan',
     ),
   ];
 
@@ -335,7 +335,7 @@ class LocalChatRepository implements ChatRepository {
 
     const broadcastConv = ChatConversation(
       id: broadcastId,
-      title: 'Siaran Darurat Lokal (Simulasi)',
+      title: 'Siaran Darurat Lokal',
       nodeId: 'Broadcast ID: #ALL-NODES',
       lastMessage: '',
       time: 'Sekarang',

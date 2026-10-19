@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/transport/mesh_transport.dart';
@@ -7,7 +8,6 @@ import '../../../core/widgets/app_header.dart';
 import '../../../core/widgets/status_badge.dart';
 import '../../chat/data/repositories/chat_repository.dart';
 import '../../chat/presentation/chat_detail_screen.dart';
-import '../models/mesh_node.dart';
 import 'widgets/radar_widget.dart';
 
 /// Layar Perangkat Terdekat & Radar sesuai referensi Layar 4 pada desain.jpg.
@@ -22,8 +22,6 @@ class MeshDevicesScreen extends StatefulWidget {
 }
 
 class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
-  bool _isScanning = false;
-
   late ChatRepository _repository;
   late MeshTransport _transport;
   StreamSubscription<List<DiscoveredPeer>>? _peersSub;
@@ -31,7 +29,6 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
   List<DiscoveredPeer> _physicalPeers = [];
   bool _isAdvertising = false;
   bool _isDiscovering = false;
-  late List<MeshNode> _nodes;
 
   @override
   void initState() {
@@ -63,8 +60,6 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
         ),
       );
     });
-
-    _loadInitialNodes();
   }
 
   @override
@@ -72,95 +67,6 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
     _peersSub?.cancel();
     _eventsSub?.cancel();
     super.dispose();
-  }
-
-  void _loadInitialNodes() {
-    _nodes = const [
-      MeshNode(
-        id: 'node-1',
-        name: 'Posko Relawan Utama',
-        distanceText: 'Jarak: ~15 meter • Sinyal Kuat',
-        signalQuality: 'Kuat',
-        status: MeshNodeStatus.connected,
-        subInfo: 'Kanal Darurat Aktif',
-        isEmergencyChannel: true,
-        radarAngle: 0.8,
-        radarRadiusRatio: 0.45,
-      ),
-      MeshNode(
-        id: 'node-2',
-        name: 'Repeater SAR Sektor 2',
-        distanceText: 'Jarak: ~45 meter • Sinyal Baik',
-        signalQuality: 'Baik',
-        status: MeshNodeStatus.connected,
-        subInfo: 'Jalur Relai Otomatis',
-        radarAngle: 2.2,
-        radarRadiusRatio: 0.65,
-      ),
-      MeshNode(
-        id: 'node-3',
-        name: 'Galaxy A54',
-        distanceText: 'Jarak: ~30 meter • Siap Tersambung',
-        signalQuality: 'Cukup',
-        status: MeshNodeStatus.available,
-        subInfo: 'Otentikasi Siap',
-        radarAngle: 3.8,
-        radarRadiusRatio: 0.78,
-      ),
-      MeshNode(
-        id: 'node-4',
-        name: 'Redmi Note 12',
-        distanceText: 'Jarak: ~50 meter',
-        signalQuality: 'Lemah',
-        status: MeshNodeStatus.connecting,
-        subInfo: 'Proses negosiasi...',
-        radarAngle: 5.1,
-        radarRadiusRatio: 0.9,
-      ),
-    ];
-  }
-
-  void _triggerSimulatedScan() {
-    setState(() {
-      _isScanning = true;
-    });
-
-    Future.delayed(const Duration(milliseconds: 1200), () {
-      if (!mounted) return;
-      setState(() {
-        _isScanning = false;
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Pemindaian simulasi selesai. Ditemukan 4 node (Data Mock).',
-          ),
-          duration: Duration(seconds: 2),
-        ),
-      );
-    });
-  }
-
-  void _navigateToChat(MeshNode node) async {
-    final conv = await _repository.getOrCreateConversationForNode(
-      nodeId: node.id,
-      nodeName: node.name,
-      isEmergency: node.isEmergencyChannel,
-      isConnected: node.status == MeshNodeStatus.connected,
-    );
-    if (!mounted) return;
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => ChatDetailScreen(
-          conversationId: conv.id,
-          conversationTitle: conv.title,
-          nodeId: conv.nodeId,
-          isEmergency: conv.isEmergency,
-          repository: _repository,
-        ),
-      ),
-    );
   }
 
   void _toggleAdvertising() async {
@@ -272,26 +178,39 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final blips = [
-      const RadarBlip(
-        label: 'SAR-2',
-        angle: 2.2,
-        distanceFactor: 0.65,
-        color: AppColors.accentBlue,
-      ),
-      const RadarBlip(
-        label: 'A01',
-        angle: 0.8,
-        distanceFactor: 0.45,
-        color: AppColors.emergencyRed,
-      ),
-      const RadarBlip(
-        label: 'Warga',
-        angle: 3.8,
-        distanceFactor: 0.78,
-        color: AppColors.successGreen,
-      ),
-    ];
+    final blips = <RadarBlip>[];
+    for (int i = 0; i < _physicalPeers.length; i++) {
+      final peer = _physicalPeers[i];
+      final angle =
+          (i *
+              (2 *
+                  math.pi /
+                  (_physicalPeers.isEmpty ? 1 : _physicalPeers.length))) +
+          0.5;
+      final distance = peer.status == PeerConnectionStatus.connected
+          ? 0.45
+          : (peer.status == PeerConnectionStatus.connecting ? 0.65 : 0.85);
+      final color = peer.status == PeerConnectionStatus.connected
+          ? AppColors.successGreen
+          : (peer.status == PeerConnectionStatus.connecting
+                ? AppColors.warningOrange
+                : AppColors.accentBlue);
+      blips.add(
+        RadarBlip(
+          label: peer.endpointName.length > 10
+              ? peer.endpointName.substring(0, 10)
+              : peer.endpointName,
+          angle: angle,
+          distanceFactor: distance,
+          color: color,
+        ),
+      );
+    }
+
+    final connectedCount = _transport.connectedPeers.length;
+    final availableCount = _physicalPeers
+        .where((p) => p.status != PeerConnectionStatus.connected)
+        .length;
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -317,9 +236,11 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text(
-                          'PENCARIAN AKTIF • 5 NODE TERDETEKSI (SIMULASI)',
-                          style: TextStyle(
+                        Text(
+                          (_isDiscovering || _isAdvertising)
+                              ? 'PENCARIAN AKTIF • ${_physicalPeers.length} PEER TERDETEKSI'
+                              : 'MODE SIAGA • ${_physicalPeers.length} PEER TERDETEKSI',
+                          style: const TextStyle(
                             color: AppColors.accentCyan,
                             fontSize: 10,
                             fontWeight: FontWeight.bold,
@@ -337,7 +258,7 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          'Memindai perangkat sekitar via Bluetooth LE & Wi-Fi Aware otomatis dalam jaringan mesh independen (Simulasi UI).',
+                          'Memindai perangkat sekitar via Bluetooth LE & Wi-Fi Direct otomatis dalam jaringan mesh independen tanpa internet.',
                           style: TextStyle(
                             color: Colors.white.withValues(alpha: 0.8),
                             fontSize: 12,
@@ -355,15 +276,15 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
                     children: [
                       Expanded(
                         child: _buildMetricTile(
-                          number: '3',
+                          number: '$connectedCount',
                           label: 'TERHUBUNG',
-                          color: AppColors.primaryNavy,
+                          color: AppColors.successGreen,
                         ),
                       ),
                       const SizedBox(width: 8),
                       Expanded(
                         child: _buildMetricTile(
-                          number: '2',
+                          number: '$availableCount',
                           label: 'TERSEDIA',
                           color: AppColors.accentBlue,
                         ),
@@ -371,8 +292,8 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
                       const SizedBox(width: 8),
                       Expanded(
                         child: _buildMetricTile(
-                          number: '~120m',
-                          label: 'RENTANG MESH',
+                          number: '${_physicalPeers.length}',
+                          label: 'TOTAL PEER',
                           color: AppColors.primaryNavy,
                         ),
                       ),
@@ -382,33 +303,42 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
                   const SizedBox(height: 14),
 
                   // Visualisasi Radar P2P
-                  RadarWidget(blips: blips),
+                  RadarWidget(
+                    blips: blips,
+                    isScanning: _isDiscovering || _isAdvertising,
+                  ),
 
                   const SizedBox(height: 18),
 
-                  // Bagian Eksperimen Transport Fisik 1-Hop
-                  _buildPhysicalTransportSection(),
+                  // Bagian Kontrol Radio Transport Fisik 1-Hop
+                  _buildRadioControls(),
 
                   const SizedBox(height: 18),
 
-                  // Judul Bagian Node
+                  // Judul Bagian Peer
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: const [
+                    children: [
                       Text(
-                        'Daftar Node Terjangkau',
-                        style: TextStyle(
+                        'Daftar Peer Terdeteksi (${_physicalPeers.length})',
+                        style: const TextStyle(
                           fontSize: 14,
                           fontWeight: FontWeight.bold,
                           color: AppColors.primaryNavy,
                         ),
                       ),
                       StatusBadge(
-                        label: 'KAPASITAS PENUH (DEMO)',
-                        backgroundColor: AppColors.surfaceSubtle,
-                        textColor: AppColors.textSecondary,
+                        label: _physicalPeers.isNotEmpty
+                            ? '${_physicalPeers.length} TERDETEKSI'
+                            : 'KOSONG',
+                        backgroundColor: _physicalPeers.isNotEmpty
+                            ? AppColors.accentPillBg
+                            : AppColors.surfaceSubtle,
+                        textColor: _physicalPeers.isNotEmpty
+                            ? AppColors.accentBlue
+                            : AppColors.textMuted,
                         fontSize: 9,
-                        padding: EdgeInsets.symmetric(
+                        padding: const EdgeInsets.symmetric(
                           horizontal: 6,
                           vertical: 2,
                         ),
@@ -418,43 +348,121 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
 
                   const SizedBox(height: 10),
 
-                  // Daftar Node
-                  ..._nodes.map((node) => _buildNodeCard(node)),
-
-                  const SizedBox(height: 14),
-
-                  // Tombol Pindai Ulang Perangkat
-                  ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      backgroundColor: AppColors.primaryNavy,
-                    ),
-                    onPressed: _isScanning ? null : _triggerSimulatedScan,
-                    child: _isScanning
-                        ? const SizedBox(
-                            height: 20,
-                            width: 20,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              valueColor: AlwaysStoppedAnimation<Color>(
-                                Colors.white,
-                              ),
+                  // Daftar Peer atau Empty State
+                  if (_physicalPeers.isEmpty)
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(
+                        vertical: 24,
+                        horizontal: 16,
+                      ),
+                      decoration: BoxDecoration(
+                        color: AppColors.surface,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: AppColors.borderLight),
+                      ),
+                      child: Column(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: const BoxDecoration(
+                              color: AppColors.surfaceSubtle,
+                              shape: BoxShape.circle,
                             ),
-                          )
-                        : const Text(
-                            'Pindai Ulang Perangkat (Simulasi)',
+                            child: const Icon(
+                              Icons.wifi_tethering_off_rounded,
+                              size: 32,
+                              color: AppColors.textMuted,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          const Text(
+                            'Belum Ada Peer Terdeteksi',
                             style: TextStyle(
                               fontSize: 14,
                               fontWeight: FontWeight.bold,
+                              color: AppColors.primaryNavy,
                             ),
                           ),
+                          const SizedBox(height: 6),
+                          const Text(
+                            'Aktifkan Siaran di satu perangkat dan Pindai di perangkat lainnya untuk membentuk koneksi mesh 1-hop nirkabel (tanpa internet).',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: AppColors.textSecondary,
+                              height: 1.4,
+                            ),
+                          ),
+                          if (!_isDiscovering) ...[
+                            const SizedBox(height: 14),
+                            OutlinedButton.icon(
+                              style: OutlinedButton.styleFrom(
+                                side: const BorderSide(
+                                  color: AppColors.primaryNavy,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
+                              onPressed: _toggleDiscovery,
+                              icon: const Icon(
+                                Icons.search,
+                                size: 16,
+                                color: AppColors.primaryNavy,
+                              ),
+                              label: const Text(
+                                'Mulai Pemindaian Sekarang',
+                                style: TextStyle(
+                                  color: AppColors.primaryNavy,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    )
+                  else
+                    ..._physicalPeers.map(
+                      (peer) => _buildPhysicalPeerCard(peer),
+                    ),
+
+                  const SizedBox(height: 16),
+
+                  // Tombol Pindai Perangkat Sekitar
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      backgroundColor: _isDiscovering
+                          ? AppColors.surfaceSubtle
+                          : AppColors.primaryNavy,
+                      foregroundColor: _isDiscovering
+                          ? AppColors.primaryNavy
+                          : Colors.white,
+                      elevation: _isDiscovering ? 0 : 2,
+                      side: _isDiscovering
+                          ? const BorderSide(color: AppColors.borderLight)
+                          : null,
+                    ),
+                    onPressed: _toggleDiscovery,
+                    child: Text(
+                      _isDiscovering
+                          ? 'Hentikan Pemindaian'
+                          : 'Pindai Perangkat Sekitar',
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                   ),
 
                   const SizedBox(height: 6),
 
                   const Center(
                     child: Text(
-                      'Pembaruan otomatis berikutnya setiap 10 detik (Simulasi)',
+                      'Koneksi peer-to-peer menggunakan Nearby Connections tanpa kuota internet.',
                       style: TextStyle(
                         fontSize: 11,
                         color: AppColors.textMuted,
@@ -509,176 +517,7 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
     );
   }
 
-  Widget _buildNodeCard(MeshNode node) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: AppColors.borderLight),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  node.name,
-                  style: const TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.bold,
-                    color: AppColors.primaryNavy,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  node.distanceText,
-                  style: const TextStyle(
-                    fontSize: 11,
-                    color: AppColors.textSecondary,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Row(
-                  children: [
-                    if (node.isEmergencyChannel) ...[
-                      Container(
-                        width: 6,
-                        height: 6,
-                        decoration: const BoxDecoration(
-                          color: AppColors.emergencyRed,
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                      const SizedBox(width: 5),
-                    ],
-                    Text(
-                      node.subInfo,
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: node.isEmergencyChannel
-                            ? AppColors.emergencyRed
-                            : AppColors.textMuted,
-                        fontWeight: node.isEmergencyChannel
-                            ? FontWeight.w600
-                            : FontWeight.normal,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 8),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              _buildStatusPill(node.status),
-              const SizedBox(height: 6),
-              _buildActionButton(node),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildStatusPill(MeshNodeStatus status) {
-    switch (status) {
-      case MeshNodeStatus.connected:
-        return const StatusBadge(
-          label: 'Terhubung',
-          backgroundColor: AppColors.accentPillBg,
-          textColor: AppColors.accentBlue,
-          fontSize: 9,
-          padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-        );
-      case MeshNodeStatus.available:
-        return const StatusBadge(
-          label: 'Tersedia',
-          backgroundColor: AppColors.surfaceSubtle,
-          textColor: AppColors.textSecondary,
-          fontSize: 9,
-          padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-        );
-      case MeshNodeStatus.connecting:
-        return const StatusBadge(
-          label: 'Menghubungkan...',
-          backgroundColor: AppColors.warningOrangeLight,
-          textColor: AppColors.warningOrange,
-          fontSize: 9,
-          padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-        );
-    }
-  }
-
-  Widget _buildActionButton(MeshNode node) {
-    if (node.status == MeshNodeStatus.connected) {
-      return InkWell(
-        onTap: () => _navigateToChat(node),
-        borderRadius: BorderRadius.circular(16),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: BoxDecoration(
-            color: AppColors.primaryNavy,
-            borderRadius: BorderRadius.circular(16),
-          ),
-          child: const Text(
-            'Kirim Pesan',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 11,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-        ),
-      );
-    } else if (node.status == MeshNodeStatus.available) {
-      return InkWell(
-        onTap: () {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Simulasi jabat tangan dengan ${node.name}...'),
-              duration: const Duration(seconds: 1),
-            ),
-          );
-        },
-        borderRadius: BorderRadius.circular(16),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-          decoration: BoxDecoration(
-            color: AppColors.accentPillBg,
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(
-              color: AppColors.accentBlue.withValues(alpha: 0.4),
-            ),
-          ),
-          child: const Text(
-            'Hubungkan',
-            style: TextStyle(
-              color: AppColors.accentBlue,
-              fontSize: 11,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-        ),
-      );
-    } else {
-      return const Text(
-        'Menunggu jabat tangan',
-        style: TextStyle(
-          fontSize: 10,
-          color: AppColors.textMuted,
-          fontStyle: FontStyle.italic,
-        ),
-      );
-    }
-  }
-
-  Widget _buildPhysicalTransportSection() {
+  Widget _buildRadioControls() {
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -713,7 +552,7 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
                   ),
                   const SizedBox(width: 8),
                   const Text(
-                    'Transport Fisik 1-Hop',
+                    'Kontrol Radio Mesh 1-Hop',
                     style: TextStyle(
                       fontSize: 14,
                       fontWeight: FontWeight.bold,
@@ -733,7 +572,7 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
           ),
           const SizedBox(height: 8),
           const Text(
-            'Eksperimen koneksi langsung antar-perangkat Android tanpa internet atau router.',
+            'Komunikasi langsung nirkabel antar-perangkat Android via Bluetooth LE dan Wi-Fi Direct.',
             style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
           ),
           const SizedBox(height: 12),
@@ -798,32 +637,6 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
               ),
             ],
           ),
-          const SizedBox(height: 12),
-          Text(
-            'Peer Fisik Terdeteksi (${_physicalPeers.length})',
-            style: const TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.bold,
-              color: AppColors.primaryNavy,
-            ),
-          ),
-          const SizedBox(height: 6),
-          if (_physicalPeers.isEmpty)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: AppColors.surfaceSubtle,
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: const Text(
-                'Belum ada peer fisik terdeteksi. Aktifkan Siaran di satu HP dan Pindai di HP lainnya.',
-                style: TextStyle(fontSize: 11, color: AppColors.textMuted),
-                textAlign: TextAlign.center,
-              ),
-            )
-          else
-            ..._physicalPeers.map((peer) => _buildPhysicalPeerCard(peer)),
         ],
       ),
     );
@@ -831,11 +644,11 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
 
   Widget _buildPhysicalPeerCard(DiscoveredPeer peer) {
     return Container(
-      margin: const EdgeInsets.only(top: 8),
-      padding: const EdgeInsets.all(10),
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: AppColors.surfaceSubtle,
-        borderRadius: BorderRadius.circular(12),
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(14),
         border: Border.all(
           color: peer.status == PeerConnectionStatus.connected
               ? AppColors.successGreen.withValues(alpha: 0.5)
@@ -845,8 +658,8 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
       child: Row(
         children: [
           Container(
-            width: 36,
-            height: 36,
+            width: 38,
+            height: 38,
             decoration: BoxDecoration(
               color: peer.status == PeerConnectionStatus.connected
                   ? AppColors.successGreen.withValues(alpha: 0.15)
@@ -861,7 +674,7 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
                   : AppColors.accentBlue,
             ),
           ),
-          const SizedBox(width: 10),
+          const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -869,74 +682,82 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
                 Text(
                   peer.endpointName,
                   style: const TextStyle(
-                    fontSize: 13,
+                    fontSize: 14,
                     fontWeight: FontWeight.bold,
                     color: AppColors.primaryNavy,
                   ),
                 ),
+                const SizedBox(height: 2),
                 Text(
-                  'ID: #${peer.endpointId} • 1-Hop Direct',
+                  peer.status == PeerConnectionStatus.connected
+                      ? 'ID: #${peer.endpointId} • Terhubung Langsung'
+                      : (peer.status == PeerConnectionStatus.connecting
+                            ? 'ID: #${peer.endpointId} • Menghubungkan...'
+                            : 'ID: #${peer.endpointId} • Sinyal Terdeteksi'),
                   style: const TextStyle(
-                    fontSize: 10,
+                    fontSize: 11,
                     color: AppColors.textMuted,
                   ),
                 ),
               ],
             ),
           ),
-          const SizedBox(width: 6),
+          const SizedBox(width: 8),
           if (peer.status == PeerConnectionStatus.connected) ...[
             InkWell(
               onTap: () => _openChatWithPhysicalPeer(peer),
-              borderRadius: BorderRadius.circular(14),
+              borderRadius: BorderRadius.circular(16),
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 6,
+                ),
                 decoration: BoxDecoration(
                   color: AppColors.primaryNavy,
-                  borderRadius: BorderRadius.circular(14),
+                  borderRadius: BorderRadius.circular(16),
                 ),
                 child: const Text(
-                  'Pesan 1-Hop',
+                  'Kirim Pesan',
                   style: TextStyle(
                     color: Colors.white,
-                    fontSize: 10,
+                    fontSize: 11,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
               ),
             ),
-            const SizedBox(width: 4),
+            const SizedBox(width: 6),
             InkWell(
               onTap: () => _disconnectPhysicalPeer(peer),
               child: const Padding(
                 padding: EdgeInsets.all(4),
                 child: Icon(
                   Icons.close,
-                  size: 16,
+                  size: 18,
                   color: AppColors.emergencyRed,
                 ),
               ),
             ),
           ] else if (peer.status == PeerConnectionStatus.connecting) ...[
             const StatusBadge(
-              label: 'Menghubungkan',
+              label: 'Menghubungkan...',
               backgroundColor: AppColors.warningOrangeLight,
               textColor: AppColors.warningOrange,
               fontSize: 9,
-              padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              padding: EdgeInsets.symmetric(horizontal: 8, vertical: 3),
             ),
           ] else ...[
             InkWell(
               onTap: () => _connectToPhysicalPeer(peer),
-              borderRadius: BorderRadius.circular(14),
+              borderRadius: BorderRadius.circular(16),
               child: Container(
                 padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 5,
+                  horizontal: 12,
+                  vertical: 6,
                 ),
                 decoration: BoxDecoration(
                   color: AppColors.accentPillBg,
-                  borderRadius: BorderRadius.circular(14),
+                  borderRadius: BorderRadius.circular(16),
                   border: Border.all(
                     color: AppColors.accentBlue.withValues(alpha: 0.4),
                   ),
@@ -945,7 +766,7 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
                   'Hubungkan',
                   style: TextStyle(
                     color: AppColors.accentBlue,
-                    fontSize: 10,
+                    fontSize: 11,
                     fontWeight: FontWeight.bold,
                   ),
                 ),

@@ -20,8 +20,9 @@ class RadarBlip {
 /// Widget visualisasi radar sinyal P2P menggunakan CustomPainter.
 class RadarWidget extends StatelessWidget {
   final List<RadarBlip> blips;
+  final bool isScanning;
 
-  const RadarWidget({super.key, required this.blips});
+  const RadarWidget({super.key, required this.blips, this.isScanning = false});
 
   @override
   Widget build(BuildContext context) {
@@ -47,7 +48,7 @@ class RadarWidget extends StatelessWidget {
                 ),
               ),
               Text(
-                'Frekuensi 2.4 / 5.0 GHz (Mock)',
+                'Wi-Fi Direct / BLE',
                 style: TextStyle(
                   fontSize: 10,
                   color: AppColors.textMuted,
@@ -59,9 +60,38 @@ class RadarWidget extends StatelessWidget {
           const SizedBox(height: 12),
           SizedBox(
             height: 180,
-            child: CustomPaint(
-              size: const Size(double.infinity, 180),
-              painter: _RadarPainter(blips: blips),
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                CustomPaint(
+                  size: const Size(double.infinity, 180),
+                  painter: _RadarPainter(blips: blips),
+                ),
+                if (blips.isEmpty)
+                  Positioned(
+                    bottom: 8,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.85),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        isScanning
+                            ? 'Sedang memindai sinyal sekitar...'
+                            : 'Belum ada perangkat terdeteksi di radar',
+                        style: const TextStyle(
+                          fontSize: 10,
+                          color: AppColors.textMuted,
+                          fontStyle: FontStyle.italic,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
             ),
           ),
           const SizedBox(height: 12),
@@ -69,15 +99,15 @@ class RadarWidget extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: const [
               Text(
-                'Protokol Mesh: SiagaLink (Simulasi)',
+                'Protokol: MANET P2P_CLUSTER',
                 style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
               ),
               Text(
-                'Latensi: <42ms (Mock)',
+                'Latensi: Belum diukur',
                 style: TextStyle(
                   fontSize: 11,
                   fontWeight: FontWeight.bold,
-                  color: AppColors.accentBlue,
+                  color: AppColors.textSecondary,
                 ),
               ),
             ],

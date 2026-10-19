@@ -29,7 +29,7 @@ class AppHeader extends StatelessWidget {
               ),
               const SizedBox(width: 8),
               StatusBadge(
-                label: 'MESH MODE (SIMULASI)',
+                label: 'SIAGAMESH MANET',
                 backgroundColor: AppColors.accentPillBg,
                 textColor: AppColors.accentPillText,
                 fontSize: 10,
@@ -43,7 +43,7 @@ class AppHeader extends StatelessWidget {
                 () {
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(
-                      content: Text('Profil Pengguna (Mode Demonstrasi)'),
+                      content: Text('Profil Pengguna SiagaMesh'),
                       duration: Duration(seconds: 1),
                     ),
                   );

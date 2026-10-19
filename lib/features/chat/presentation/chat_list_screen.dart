@@ -108,7 +108,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
               child: ListView(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 children: [
-                  // Banner Protokol SiagaMesh (Penjelasan Simulasi)
+                  // Banner Protokol SiagaMesh
                   Container(
                     width: double.infinity,
                     padding: const EdgeInsets.all(14),
@@ -134,7 +134,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
                               ),
                               const SizedBox(height: 3),
                               const Text(
-                                'Jaringan Darurat Offline (Demo UI)',
+                                'Jaringan Komunikasi Darurat Offline',
                                 style: TextStyle(
                                   color: Colors.white,
                                   fontSize: 13,
@@ -143,7 +143,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
                               ),
                               const SizedBox(height: 3),
                               Text(
-                                'Pesan terkirim langsung antar ponsel tanpa internet (Simulasi UI). Komunikasi radio fisik belum diimplementasikan.',
+                                'Pesan offline langsung antar-perangkat via Nearby Connections tanpa internet.',
                                 style: TextStyle(
                                   color: Colors.white.withValues(alpha: 0.75),
                                   fontSize: 11,

@@ -2,30 +2,40 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:siagamesh_app/app.dart';
+import 'package:siagamesh_app/core/routing/routing_holder.dart';
 import 'package:siagamesh_app/core/transport/fake_mesh_transport.dart';
+import 'package:siagamesh_app/core/transport/mesh_transport.dart';
 import 'package:siagamesh_app/core/transport/transport_holder.dart';
 import 'package:siagamesh_app/features/chat/data/repositories/chat_repository.dart';
 
 void main() {
-  setUp(() {
+  late FakeMeshTransport fakeTransport;
+
+  setUp(() async {
     SharedPreferences.setMockInitialValues({});
-    ChatRepositoryHolder.setInstance(LocalChatRepository());
-    MeshTransportHolder.setInstance(FakeMeshTransport());
+    final repo = LocalChatRepository();
+    await repo.clearAllData();
+    ChatRepositoryHolder.setInstance(repo);
+    fakeTransport = FakeMeshTransport();
+    MeshTransportHolder.setInstance(fakeTransport);
+    ManetRoutingHolder.reset();
   });
 
   testWidgets('SiagaMesh initial smoke test', (WidgetTester tester) async {
-    await tester.pumpWidget(const SiagaMeshApp());
+    await tester.pumpWidget(SiagaMeshApp(transport: fakeTransport));
 
     expect(find.text('SiagaMesh'), findsWidgets);
     expect(find.text('KIRIM PESAN DARURAT (SOS)'), findsOneWidget);
     expect(find.text('KONEKTIVITAS MESH'), findsOneWidget);
     expect(find.text('INTERNET TIDAK DIBUTUHKAN'), findsOneWidget);
+    expect(find.text('MODE SIAGA (STANDBY)'), findsOneWidget);
+    expect(find.text('0 Perangkat Terdeteksi'), findsOneWidget);
   });
 
   testWidgets('Verifikasi akses navigasi seluruh 4 layar', (
     WidgetTester tester,
   ) async {
-    await tester.pumpWidget(const SiagaMeshApp());
+    await tester.pumpWidget(SiagaMeshApp(transport: fakeTransport));
 
     // 1. Layar Beranda (default)
     expect(find.text('KIRIM PESAN DARURAT (SOS)'), findsOneWidget);
@@ -35,7 +45,7 @@ void main() {
     await tester.tap(find.text('Pesan'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Jaringan Darurat Offline (Demo UI)'), findsOneWidget);
+    expect(find.text('Jaringan Komunikasi Darurat Offline'), findsOneWidget);
     expect(find.text('Posko Medis Darurat'), findsOneWidget);
 
     // 3. Navigasi ke Layar Detail Percakapan (Klik item percakapan)
@@ -54,32 +64,76 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Radar Sinyal Peer-to-Peer'), findsOneWidget);
+    expect(find.text('MODE SIAGA • 0 PEER TERDETEKSI'), findsOneWidget);
+
+    await tester.drag(find.byType(ListView), const Offset(0, -300));
+    await tester.pumpAndSettle();
+    expect(find.text('Belum Ada Peer Terdeteksi'), findsOneWidget);
+  });
+
+  testWidgets('Verifikasi interaksi tombol SOS saat belum ada peer terhubung', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(SiagaMeshApp(transport: fakeTransport));
+
+    // Tekan tombol SOS saat belum ada peer
+    await tester.tap(find.text('KIRIM PESAN DARURAT (SOS)'));
+    await tester.pumpAndSettle();
+
+    // Verifikasi dialog peringatan muncul
+    expect(find.text('Peringatan Darurat (SOS)'), findsOneWidget);
+    expect(find.text('Simpan ke Antrean Siaran'), findsOneWidget);
+
+    // Tekan Simpan ke Antrean Siaran
+    await tester.tap(find.text('Simpan ke Antrean Siaran'));
+    await tester.pumpAndSettle();
+
+    // Verifikasi SnackBar muncul
     expect(
-      find.text('PENCARIAN AKTIF • 5 NODE TERDETEKSI (SIMULASI)'),
+      find.text(
+        'Pesan darurat disimpan di antrean transmisi lokal. Akan disiarkan otomatis saat peer terhubung.',
+      ),
       findsOneWidget,
     );
   });
 
-  testWidgets('Verifikasi interaksi tombol SOS dan dialog konfirmasi', (
+  testWidgets('Verifikasi interaksi tombol SOS saat peer terhubung', (
     WidgetTester tester,
   ) async {
-    await tester.pumpWidget(const SiagaMeshApp());
+    // Simulasikan peer fisik terhubung
+    fakeTransport.simulatePeerDiscovered(
+      DiscoveredPeer(
+        endpointId: 'peer-alpha',
+        endpointName: 'Node Relawan Alpha',
+        serviceId: 'com.siagamesh.emergency.mesh',
+        discoveredAt: DateTime.now(),
+        status: PeerConnectionStatus.connected,
+      ),
+    );
+
+    await tester.pumpWidget(SiagaMeshApp(transport: fakeTransport));
+    await tester.pumpAndSettle();
+
+    // Pastikan status beranda menunjukkan jaringan terhubung
+    expect(find.text('JARINGAN TERHUBUNG'), findsOneWidget);
 
     // Tekan tombol SOS
     await tester.tap(find.text('KIRIM PESAN DARURAT (SOS)'));
     await tester.pumpAndSettle();
 
-    // Verifikasi dialog muncul
-    expect(find.text('Simulasi SOS'), findsOneWidget);
-    expect(find.text('Uji Simulasi SOS'), findsOneWidget);
+    // Verifikasi dialog konfirmasi siaran
+    expect(find.text('Konfirmasi Siaran Darurat'), findsOneWidget);
+    expect(find.text('SIARKAN SEKARANG'), findsOneWidget);
 
-    // Tekan Uji Simulasi SOS
-    await tester.tap(find.text('Uji Simulasi SOS'));
+    // Tekan SIARKAN SEKARANG
+    await tester.tap(find.text('SIARKAN SEKARANG'));
     await tester.pumpAndSettle();
 
-    // Verifikasi SnackBar muncul
+    // Verifikasi SnackBar siaran terkirim
     expect(
-      find.text('Peringatan SOS tersimpan di memori lokal (Mode Demonstrasi).'),
+      find.text(
+        'Sinyal SOS darurat berhasil diserahkan ke stack transport mesh (1 peer).',
+      ),
       findsOneWidget,
     );
   });
@@ -87,7 +141,7 @@ void main() {
   testWidgets('Verifikasi filter dan pencarian di Daftar Pesan', (
     WidgetTester tester,
   ) async {
-    await tester.pumpWidget(const SiagaMeshApp());
+    await tester.pumpWidget(SiagaMeshApp(transport: fakeTransport));
 
     // Buka Tab Pesan
     await tester.tap(find.text('Pesan'));
@@ -145,7 +199,7 @@ void main() {
   testWidgets(
     'Verifikasi pengiriman pesan dan tombol respons cepat di Detail Percakapan',
     (WidgetTester tester) async {
-      await tester.pumpWidget(const SiagaMeshApp());
+      await tester.pumpWidget(SiagaMeshApp(transport: fakeTransport));
 
       // Buka Pesan -> Posko Medis Darurat
       await tester.tap(find.text('Pesan'));
@@ -153,7 +207,7 @@ void main() {
       await tester.tap(find.text('Posko Medis Darurat'));
       await tester.pumpAndSettle();
 
-      // Ketik pesan simulasi manual
+      // Ketik pesan manual
       await tester.enterText(
         find.byType(TextField),
         'Laporan: Posisi aman terkendali',
@@ -183,7 +237,7 @@ void main() {
   testWidgets(
     'Verifikasi tombol Buat Pesan Baru membuka halaman siaran kosong',
     (WidgetTester tester) async {
-      await tester.pumpWidget(const SiagaMeshApp());
+      await tester.pumpWidget(SiagaMeshApp(transport: fakeTransport));
 
       await tester.tap(find.text('Pesan'));
       await tester.pumpAndSettle();
@@ -196,7 +250,7 @@ void main() {
       await tester.pumpAndSettle();
 
       // Verifikasi berada di halaman siaran baru
-      expect(find.text('Siaran Darurat Lokal (Simulasi)'), findsOneWidget);
+      expect(find.text('Siaran Darurat Lokal'), findsOneWidget);
       expect(find.text('Belum ada pesan siaran'), findsOneWidget);
 
       // Kirim pesan pertama
@@ -209,41 +263,71 @@ void main() {
     },
   );
 
-  testWidgets('Verifikasi interaksi pada Layar Perangkat', (
-    WidgetTester tester,
-  ) async {
-    await tester.pumpWidget(const SiagaMeshApp());
+  testWidgets(
+    'Verifikasi interaksi pada Layar Perangkat dengan peer fisik riil',
+    (WidgetTester tester) async {
+      // Simulasikan 2 peer fisik
+      fakeTransport.simulatePeerDiscovered(
+        DiscoveredPeer(
+          endpointId: 'node-sar-1',
+          endpointName: 'Posko Relawan SAR',
+          serviceId: 'com.siagamesh.emergency.mesh',
+          discoveredAt: DateTime.now(),
+          status: PeerConnectionStatus.connected,
+        ),
+      );
+      fakeTransport.simulatePeerDiscovered(
+        DiscoveredPeer(
+          endpointId: 'node-warga-2',
+          endpointName: 'Warga Blok B',
+          serviceId: 'com.siagamesh.emergency.mesh',
+          discoveredAt: DateTime.now(),
+          status: PeerConnectionStatus.disconnected,
+        ),
+      );
 
-    await tester.tap(find.text('Perangkat'));
-    await tester.pumpAndSettle();
+      await tester.pumpWidget(SiagaMeshApp(transport: fakeTransport));
 
-    // Drag ke atas untuk melihat node Posko Relawan Utama
-    await tester.drag(find.byType(ListView), const Offset(0, -450));
-    await tester.pumpAndSettle();
+      await tester.tap(find.text('Perangkat'));
+      await tester.pumpAndSettle();
 
-    // Klik tombol Kirim Pesan pada node Posko Relawan Utama
-    expect(find.text('Kirim Pesan'), findsWidgets);
-    await tester.tap(find.text('Kirim Pesan').first);
-    await tester.pumpAndSettle();
+      // Verifikasi radar sinyal peer-to-peer
+      expect(find.text('Radar Sinyal Peer-to-Peer'), findsOneWidget);
 
-    expect(find.text('Detail Percakapan'), findsOneWidget);
-    expect(find.text('Posko Relawan Utama'), findsOneWidget);
+      // Drag ke atas untuk melihat daftar peer
+      await tester.drag(find.byType(ListView), const Offset(0, -300));
+      await tester.pumpAndSettle();
 
-    // Kembali ke Layar Perangkat
-    await tester.tap(find.byIcon(Icons.arrow_back_ios_new));
-    await tester.pumpAndSettle();
+      expect(find.text('Daftar Peer Terdeteksi (2)'), findsOneWidget);
 
-    // Drag lebih lanjut ke bawah untuk melihat node Galaxy A54
-    await tester.drag(find.byType(ListView), const Offset(0, -400));
-    await tester.pumpAndSettle();
+      // Klik tombol Kirim Pesan pada peer terhubung
+      expect(find.text('Kirim Pesan'), findsOneWidget);
+      await tester.tap(find.text('Kirim Pesan'));
+      await tester.pumpAndSettle();
 
-    expect(find.text('Hubungkan'), findsOneWidget);
-    await tester.tap(find.text('Hubungkan'));
-    await tester.pumpAndSettle();
+      expect(find.text('Detail Percakapan'), findsOneWidget);
+      expect(find.text('Posko Relawan SAR'), findsOneWidget);
 
-    expect(
-      find.text('Simulasi jabat tangan dengan Galaxy A54...'),
-      findsOneWidget,
-    );
-  });
+      // Kembali ke Layar Perangkat
+      await tester.tap(find.byIcon(Icons.arrow_back_ios_new));
+      await tester.pumpAndSettle();
+
+      // Drag sedikit ke atas agar tombol Hubungkan terlihat bebas dari bottom nav
+      await tester.drag(find.byType(ListView), const Offset(0, -200));
+      await tester.pumpAndSettle();
+
+      // Peer kedua (Warga Blok B) yang belum terhubung memiliki tombol Hubungkan
+      expect(find.text('Hubungkan'), findsOneWidget);
+      await tester.tap(find.text('Hubungkan'));
+      await tester.pumpAndSettle();
+
+      // Memverifikasi request koneksi riil pada fake transport
+      expect(
+        fakeTransport.currentPeers
+            .firstWhere((p) => p.endpointId == 'node-warga-2')
+            .status,
+        PeerConnectionStatus.connecting,
+      );
+    },
+  );
 }
