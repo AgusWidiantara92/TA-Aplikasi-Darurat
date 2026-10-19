@@ -1,4 +1,5 @@
 import '../../features/chat/data/repositories/chat_repository.dart';
+import '../blockchain/blockdag_security_coordinator.dart';
 import '../ids/selective_forwarding_detector.dart';
 import '../transport/transport_holder.dart';
 import '../trust/dynamic_trust_manager.dart';
@@ -15,6 +16,7 @@ class ManetRoutingHolder {
   static MeshExperimentLogger? _logger;
   static SelectiveForwardingDetector? _idsDetector;
   static DynamicTrustManager? _trustManager;
+  static BlockdagSecurityCoordinator? _blockdagCoordinator;
   static bool _enableTrustRoutingPolicy = false;
 
   static MeshExperimentLogger get logger => _logger ??= MeshExperimentLogger();
@@ -33,6 +35,13 @@ class ManetRoutingHolder {
 
   static void setTrustManager(DynamicTrustManager? manager) {
     _trustManager = manager;
+  }
+
+  static BlockdagSecurityCoordinator? get blockdagCoordinator =>
+      _blockdagCoordinator;
+
+  static void setBlockdagCoordinator(BlockdagSecurityCoordinator? coordinator) {
+    _blockdagCoordinator = coordinator;
   }
 
   static bool get enableTrustRoutingPolicy => _enableTrustRoutingPolicy;
@@ -66,6 +75,8 @@ class ManetRoutingHolder {
     _idsDetector = null;
     _trustManager?.dispose();
     _trustManager = null;
+    _blockdagCoordinator?.dispose();
+    _blockdagCoordinator = null;
     _enableTrustRoutingPolicy = false;
   }
 }

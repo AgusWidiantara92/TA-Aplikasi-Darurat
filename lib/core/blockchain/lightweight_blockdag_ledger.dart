@@ -482,6 +482,47 @@ class LightweightBlockdagLedger {
     return false;
   }
 
+  /// Ekspor seluruh state internal aktif ke dalam [BlockdagPersistedState].
+  BlockdagPersistedState exportPersistedState({int schemaVersion = 1}) {
+    return BlockdagPersistedState(
+      schemaVersion: schemaVersion,
+      blocks: _blocks.values.toList(),
+      checkpoints: _checkpoints.toList(),
+      tipHashes: _tipHashes.toList(),
+      processedBlockHashes: _processedBlockHashes.toList(),
+      processedEventIds: _processedEventIds.toList(),
+      pendingEvents: _pendingEvents.toList(),
+      savedAt: DateTime.now().toUtc(),
+    );
+  }
+
+  /// Memulihkan state internal dari [BlockdagPersistedState].
+  void restoreFromPersistedState(BlockdagPersistedState state) {
+    _blocks.clear();
+    _children.clear();
+    _tipHashes.clear();
+    _processedBlockHashes.clear();
+    _processedEventIds.clear();
+    _pendingEvents.clear();
+    _checkpoints.clear();
+
+    for (final b in state.blocks) {
+      _blocks[b.blockHash] = b;
+      for (final parent in b.parentBlockHashes) {
+        _children.putIfAbsent(parent, () => <String>{}).add(b.blockHash);
+      }
+    }
+    _tipHashes.addAll(state.tipHashes);
+    _processedBlockHashes.addAll(state.processedBlockHashes);
+    _processedEventIds.addAll(state.processedEventIds);
+    _pendingEvents.addAll(state.pendingEvents);
+    _checkpoints.addAll(state.checkpoints);
+
+    if (_blocks.isEmpty) {
+      _initializeGenesis();
+    }
+  }
+
   /// Mengosongkan seluruh state ledger dan menginisialisasi ulang dari Genesis.
   void reset() {
     _blocks.clear();

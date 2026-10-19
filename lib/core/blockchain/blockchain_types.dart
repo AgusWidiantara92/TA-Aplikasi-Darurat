@@ -661,7 +661,102 @@ class LedgerCheckpoint {
     'retainedGenesisHash': retainedGenesisHash,
     'prunedBlockCount': prunedBlockCount,
     'prunedEventCount': prunedEventCount,
+    'prunedBlockHashes': prunedBlockHashes.toList(),
+    'prunedEventIds': prunedEventIds.toList(),
     'createdAt': createdAt.toIso8601String(),
     'summaryMetadata': summaryMetadata,
   };
+
+  factory LedgerCheckpoint.fromMap(Map<String, dynamic> map) {
+    return LedgerCheckpoint(
+      checkpointIndex: (map['checkpointIndex'] as num).toInt(),
+      lastPrunedIndex: (map['lastPrunedIndex'] as num).toInt(),
+      retainedGenesisHash: map['retainedGenesisHash'] as String,
+      prunedBlockHashes: Set<String>.from(
+        (map['prunedBlockHashes'] as List? ?? []).map((e) => e.toString()),
+      ),
+      prunedEventIds: Set<String>.from(
+        (map['prunedEventIds'] as List? ?? []).map((e) => e.toString()),
+      ),
+      createdAt: map['createdAt'] != null
+          ? DateTime.parse(map['createdAt'] as String)
+          : DateTime.now().toUtc(),
+      summaryMetadata: Map<String, dynamic>.from(
+        map['summaryMetadata'] as Map? ?? {},
+      ),
+    );
+  }
+}
+
+/// Model snapshot seluruh state BlockDAG untuk persistensi lokal dan pemulihan.
+class BlockdagPersistedState {
+  final int schemaVersion;
+  final List<SecurityBlock> blocks;
+  final List<LedgerCheckpoint> checkpoints;
+  final List<String> tipHashes;
+  final List<String> processedBlockHashes;
+  final List<String> processedEventIds;
+  final List<SecurityAuditEvent> pendingEvents;
+  final DateTime savedAt;
+
+  const BlockdagPersistedState({
+    this.schemaVersion = 1,
+    required this.blocks,
+    this.checkpoints = const [],
+    required this.tipHashes,
+    required this.processedBlockHashes,
+    required this.processedEventIds,
+    this.pendingEvents = const [],
+    required this.savedAt,
+  });
+
+  Map<String, dynamic> toMap() => {
+    'schemaVersion': schemaVersion,
+    'blocks': blocks.map((b) => b.toMap()).toList(),
+    'checkpoints': checkpoints.map((c) => c.toMap()).toList(),
+    'tipHashes': tipHashes,
+    'processedBlockHashes': processedBlockHashes,
+    'processedEventIds': processedEventIds,
+    'pendingEvents': pendingEvents.map((e) => e.toMap()).toList(),
+    'savedAt': savedAt.toUtc().toIso8601String(),
+  };
+
+  factory BlockdagPersistedState.fromMap(Map<String, dynamic> map) {
+    final rawBlocks = map['blocks'] as List? ?? [];
+    final blocks = rawBlocks
+        .map((b) => SecurityBlock.fromMap(Map<String, dynamic>.from(b as Map)))
+        .toList();
+
+    final rawCheckpoints = map['checkpoints'] as List? ?? [];
+    final checkpoints = rawCheckpoints
+        .map(
+          (c) => LedgerCheckpoint.fromMap(Map<String, dynamic>.from(c as Map)),
+        )
+        .toList();
+
+    final rawPending = map['pendingEvents'] as List? ?? [];
+    final pending = rawPending
+        .map(
+          (e) =>
+              SecurityAuditEvent.fromMap(Map<String, dynamic>.from(e as Map)),
+        )
+        .toList();
+
+    return BlockdagPersistedState(
+      schemaVersion: (map['schemaVersion'] as num?)?.toInt() ?? 1,
+      blocks: blocks,
+      checkpoints: checkpoints,
+      tipHashes: List<String>.from(map['tipHashes'] as List? ?? []),
+      processedBlockHashes: List<String>.from(
+        map['processedBlockHashes'] as List? ?? [],
+      ),
+      processedEventIds: List<String>.from(
+        map['processedEventIds'] as List? ?? [],
+      ),
+      pendingEvents: pending,
+      savedAt: map['savedAt'] != null
+          ? DateTime.parse(map['savedAt'] as String)
+          : DateTime.now().toUtc(),
+    );
+  }
 }
