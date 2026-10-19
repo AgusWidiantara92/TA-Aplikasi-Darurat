@@ -75,6 +75,10 @@ enum BlockdagInitStatus {
   /// Versi skema tidak didukung; inisialisasi dihentikan agar tidak menimpa data lama.
   unsupportedVersionHalted,
 
+  /// Dua slot penyimpanan memuat state valid yang berbeda tanpa pointer otoritatif;
+  /// inisialisasi dihentikan agar tidak menimpa salah satu state secara sepihak.
+  ambiguousStateHalted,
+
   /// Pembuatan Genesis awal gagal disimpan ke storage.
   genesisPersistenceFailed,
 }
@@ -168,6 +172,12 @@ class BlockdagSecurityCoordinator {
       case BlockdagLoadStatus.unsupportedVersion:
         // Versi skema tidak didukung: JANGAN menimpa data pengguna dengan Genesis baru!
         _initStatus = BlockdagInitStatus.unsupportedVersionHalted;
+        _isInitialized = false; // Hentikan inisialisasi persisten
+        return _initStatus;
+
+      case BlockdagLoadStatus.ambiguousState:
+        // Konflik state ambigu pada kedua slot: JANGAN menimpa data dengan Genesis baru!
+        _initStatus = BlockdagInitStatus.ambiguousStateHalted;
         _isInitialized = false; // Hentikan inisialisasi persisten
         return _initStatus;
 

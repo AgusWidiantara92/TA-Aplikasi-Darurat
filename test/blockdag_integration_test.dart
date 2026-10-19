@@ -2519,5 +2519,558 @@ void main() {
         expect(repo.lastLoadCorrupted, isFalse);
       },
     );
+
+    group('STAGE 5E.4.4.3 — Dual-Slot Recovery & Commit Verification', () {
+      test(
+        '49. Staged commit read-back and envelope validation before active pointer changes',
+        () async {
+          final prefs = await SharedPreferences.getInstance();
+          final repo = LocalBlockdagRepository(preferences: prefs);
+          await repo.clear();
+
+          final ledger = LightweightBlockdagLedger();
+          final state = ledger.exportPersistedState();
+
+          final saved = await repo.saveState(state);
+          expect(saved, isTrue);
+
+          final activeSlot = await repo.getActiveSlot();
+          expect(activeSlot, equals(LocalBlockdagRepository.slotA));
+
+          // Read-back verification passed and active slot contains valid envelope
+          final rawJson = prefs.getString(LocalBlockdagRepository.keySlotA);
+          expect(rawJson, isNotNull);
+          final decoded = jsonDecode(rawJson!) as Map<String, dynamic>;
+          expect(decoded['schemaVersion'], equals(1));
+          expect(decoded['checksum'], isNotEmpty);
+          expect(decoded['state'], isNotNull);
+        },
+      );
+
+      test(
+        '50. Read-back failure prevents pointer change and keeps old state authoritative',
+        () async {
+          final prefs = await SharedPreferences.getInstance();
+          final repo = LocalBlockdagRepository(preferences: prefs);
+          await repo.clear();
+
+          final ledger = LightweightBlockdagLedger();
+          final state1 = ledger.exportPersistedState();
+          await repo.saveState(state1);
+
+          expect(
+            await repo.getActiveSlot(),
+            equals(LocalBlockdagRepository.slotA),
+          );
+
+          // Add a block to create state2
+          ledger.createBlock(
+            creatorNodeId: 'NODE-A',
+            validationProof: {'test': 50},
+          );
+          final state2 = ledger.exportPersistedState();
+
+          // Simulate read-back verification failure
+          repo.simulateReadBackFailure = true;
+          final saved2 = await repo.saveState(state2);
+          expect(saved2, isFalse);
+
+          // Pointer must remain slot_a
+          expect(
+            await repo.getActiveSlot(),
+            equals(LocalBlockdagRepository.slotA),
+          );
+
+          // Reload state: must load state1 (1 block, Genesis)
+          final reloadResult = await repo.loadResult();
+          expect(reloadResult.status, equals(BlockdagLoadStatus.success));
+          expect(reloadResult.state!.blocks.length, equals(1));
+          expect(
+            reloadResult.activeSlot,
+            equals(LocalBlockdagRepository.slotA),
+          );
+          expect(reloadResult.isRecoveredFromAlternate, isFalse);
+        },
+      );
+
+      test(
+        '51. Corrupt active slot with valid alternate slot recovers cleanly with isRecoveredFromAlternate == true',
+        () async {
+          final ledger = LightweightBlockdagLedger();
+          final validState = ledger.exportPersistedState();
+          final validMap = validState.toMap();
+          final validChecksum = computeSha256(canonicalJsonEncode(validMap));
+          final validEnvelope = jsonEncode({
+            'schemaVersion': 1,
+            'state': validMap,
+            'checksum': validChecksum,
+            'committedAt': DateTime.now().toUtc().toIso8601String(),
+          });
+
+          // Set up slot_b as valid, but slot_a as corrupted, with active pointer pointing to slot_a
+          SharedPreferences.setMockInitialValues({
+            LocalBlockdagRepository.keyActiveSlot:
+                LocalBlockdagRepository.slotA,
+            LocalBlockdagRepository.keySlotA: '{bad_json_corrupted: true,',
+            LocalBlockdagRepository.keySlotB: validEnvelope,
+          });
+
+          final repo = LocalBlockdagRepository();
+          final loadRes = await repo.loadResult();
+
+          expect(loadRes.status, equals(BlockdagLoadStatus.success));
+          expect(loadRes.isSuccess, isTrue);
+          expect(loadRes.isRecoveredFromAlternate, isTrue);
+          expect(loadRes.recoveredSlot, equals(LocalBlockdagRepository.slotB));
+          expect(loadRes.state!.blocks.length, equals(1));
+          expect(repo.lastLoadCorrupted, isFalse); // Clean recovery
+        },
+      );
+
+      test(
+        '52. Missing active slot with valid alternate slot recovers cleanly',
+        () async {
+          final ledger = LightweightBlockdagLedger();
+          final validState = ledger.exportPersistedState();
+          final validMap = validState.toMap();
+          final validChecksum = computeSha256(canonicalJsonEncode(validMap));
+          final validEnvelope = jsonEncode({
+            'schemaVersion': 1,
+            'state': validMap,
+            'checksum': validChecksum,
+            'committedAt': DateTime.now().toUtc().toIso8601String(),
+          });
+
+          // Pointer points to slot_a, but slot_a is empty/missing, slot_b has valid state
+          SharedPreferences.setMockInitialValues({
+            LocalBlockdagRepository.keyActiveSlot:
+                LocalBlockdagRepository.slotA,
+            LocalBlockdagRepository.keySlotB: validEnvelope,
+          });
+
+          final repo = LocalBlockdagRepository();
+          final loadRes = await repo.loadResult();
+
+          expect(loadRes.status, equals(BlockdagLoadStatus.success));
+          expect(loadRes.isRecoveredFromAlternate, isTrue);
+          expect(loadRes.recoveredSlot, equals(LocalBlockdagRepository.slotB));
+          expect(loadRes.state!.blocks.length, equals(1));
+        },
+      );
+
+      test(
+        '53. Both slots valid with different states and valid pointer loads authoritative active slot',
+        () async {
+          final ledger1 = LightweightBlockdagLedger();
+          final state1 = ledger1.exportPersistedState();
+          final map1 = state1.toMap();
+          final env1 = jsonEncode({
+            'schemaVersion': 1,
+            'state': map1,
+            'checksum': computeSha256(canonicalJsonEncode(map1)),
+            'committedAt': DateTime.now().toUtc().toIso8601String(),
+          });
+
+          final ledger2 = LightweightBlockdagLedger();
+          ledger2.createBlock(
+            creatorNodeId: 'NODE-B',
+            validationProof: {'blk': 2},
+          );
+          final state2 = ledger2.exportPersistedState();
+          final map2 = state2.toMap();
+          final env2 = jsonEncode({
+            'schemaVersion': 1,
+            'state': map2,
+            'checksum': computeSha256(canonicalJsonEncode(map2)),
+            'committedAt': DateTime.now().toUtc().toIso8601String(),
+          });
+
+          // Pointer points to slot_b (which has 2 blocks)
+          SharedPreferences.setMockInitialValues({
+            LocalBlockdagRepository.keyActiveSlot:
+                LocalBlockdagRepository.slotB,
+            LocalBlockdagRepository.keySlotA: env1,
+            LocalBlockdagRepository.keySlotB: env2,
+          });
+
+          final repo = LocalBlockdagRepository();
+          final loadRes = await repo.loadResult();
+
+          expect(loadRes.status, equals(BlockdagLoadStatus.success));
+          expect(loadRes.isRecoveredFromAlternate, isFalse);
+          expect(loadRes.activeSlot, equals(LocalBlockdagRepository.slotB));
+          expect(loadRes.state!.blocks.length, equals(2));
+        },
+      );
+
+      test(
+        '54. Invalid pointer with both slots valid but different states returns ambiguousState',
+        () async {
+          final ledger1 = LightweightBlockdagLedger();
+          final state1 = ledger1.exportPersistedState();
+          final map1 = state1.toMap();
+          final env1 = jsonEncode({
+            'schemaVersion': 1,
+            'state': map1,
+            'checksum': computeSha256(canonicalJsonEncode(map1)),
+            'committedAt': DateTime.now().toUtc().toIso8601String(),
+          });
+
+          final ledger2 = LightweightBlockdagLedger();
+          ledger2.createBlock(
+            creatorNodeId: 'NODE-B',
+            validationProof: {'blk': 2},
+          );
+          final state2 = ledger2.exportPersistedState();
+          final map2 = state2.toMap();
+          final env2 = jsonEncode({
+            'schemaVersion': 1,
+            'state': map2,
+            'checksum': computeSha256(canonicalJsonEncode(map2)),
+            'committedAt': DateTime.now().toUtc().toIso8601String(),
+          });
+
+          // Invalid pointer string
+          SharedPreferences.setMockInitialValues({
+            LocalBlockdagRepository.keyActiveSlot: 'invalid_pointer_xyz',
+            LocalBlockdagRepository.keySlotA: env1,
+            LocalBlockdagRepository.keySlotB: env2,
+          });
+
+          final repo = LocalBlockdagRepository();
+          final loadRes = await repo.loadResult();
+
+          expect(loadRes.status, equals(BlockdagLoadStatus.ambiguousState));
+          expect(loadRes.isAmbiguous, isTrue);
+          expect(loadRes.state, isNull);
+          expect(loadRes.errorMessage, contains('ambigu'));
+          expect(repo.lastLoadCorrupted, isFalse);
+        },
+      );
+
+      test(
+        '55. Unsupported schemaVersion in active slot halts without downgrading to alternate slot',
+        () async {
+          final ledger1 = LightweightBlockdagLedger();
+          final map1 = ledger1.exportPersistedState().toMap();
+          final env1 = jsonEncode({
+            'schemaVersion': 1,
+            'state': map1,
+            'checksum': computeSha256(canonicalJsonEncode(map1)),
+            'committedAt': DateTime.now().toUtc().toIso8601String(),
+          });
+
+          // Envelope in slot_a has schemaVersion: 2
+          final envV2 = jsonEncode({
+            'schemaVersion': 2,
+            'state': {...map1, 'schemaVersion': 2},
+            'checksum': computeSha256(
+              canonicalJsonEncode({...map1, 'schemaVersion': 2}),
+            ),
+            'committedAt': DateTime.now().toUtc().toIso8601String(),
+          });
+
+          SharedPreferences.setMockInitialValues({
+            LocalBlockdagRepository.keyActiveSlot:
+                LocalBlockdagRepository.slotA,
+            LocalBlockdagRepository.keySlotA: envV2,
+            LocalBlockdagRepository.keySlotB:
+                env1, // valid version 1 in alternate slot
+          });
+
+          final repo = LocalBlockdagRepository();
+          final loadRes = await repo.loadResult();
+
+          // Must halt with unsupportedVersion and NOT downgrade to slot_b!
+          expect(loadRes.status, equals(BlockdagLoadStatus.unsupportedVersion));
+          expect(loadRes.isUnsupportedVersion, isTrue);
+          expect(loadRes.detectedSchemaVersion, equals(2));
+          expect(loadRes.state, isNull);
+        },
+      );
+
+      test(
+        '56. Both slots corrupt returns corruptedData with lastLoadCorrupted == true',
+        () async {
+          SharedPreferences.setMockInitialValues({
+            LocalBlockdagRepository.keyActiveSlot:
+                LocalBlockdagRepository.slotA,
+            LocalBlockdagRepository.keySlotA: '{bad_json_slot_a: true',
+            LocalBlockdagRepository.keySlotB: '{bad_json_slot_b: true',
+          });
+
+          final repo = LocalBlockdagRepository();
+          final loadRes = await repo.loadResult();
+
+          expect(loadRes.status, equals(BlockdagLoadStatus.corruptedData));
+          expect(loadRes.isCorrupted, isTrue);
+          expect(repo.lastLoadCorrupted, isTrue);
+        },
+      );
+
+      test(
+        '57. Storage unavailable during recovery returns storageUnavailable with lastLoadCorrupted == false',
+        () async {
+          final repo = LocalBlockdagRepository(
+            simulateStorageUnavailable: true,
+          );
+          final loadRes = await repo.loadResult();
+
+          expect(loadRes.status, equals(BlockdagLoadStatus.storageUnavailable));
+          expect(loadRes.isStorageUnavailable, isTrue);
+          expect(repo.lastLoadCorrupted, isFalse);
+        },
+      );
+
+      test(
+        '58. Alternate recovery explicitly marked with isRecoveredFromAlternate and recoveredSlot',
+        () async {
+          final ledger = LightweightBlockdagLedger();
+          final mapB = ledger.exportPersistedState().toMap();
+          final envB = jsonEncode({
+            'schemaVersion': 1,
+            'state': mapB,
+            'checksum': computeSha256(canonicalJsonEncode(mapB)),
+            'committedAt': DateTime.now().toUtc().toIso8601String(),
+          });
+
+          // Slot A has checksum mismatch
+          final envA = jsonEncode({
+            'schemaVersion': 1,
+            'state': mapB,
+            'checksum':
+                '0000000000000000000000000000000000000000000000000000000000000000',
+            'committedAt': DateTime.now().toUtc().toIso8601String(),
+          });
+
+          SharedPreferences.setMockInitialValues({
+            LocalBlockdagRepository.keyActiveSlot:
+                LocalBlockdagRepository.slotA,
+            LocalBlockdagRepository.keySlotA: envA,
+            LocalBlockdagRepository.keySlotB: envB,
+          });
+
+          final repo = LocalBlockdagRepository();
+          final loadRes = await repo.loadResult();
+
+          expect(loadRes.status, equals(BlockdagLoadStatus.success));
+          expect(loadRes.isRecoveredFromAlternate, isTrue);
+          expect(loadRes.recoveredSlot, equals(LocalBlockdagRepository.slotB));
+          expect(loadRes.errorMessage, contains('alternate slot (slot_b)'));
+        },
+      );
+
+      test(
+        '59. Subsequent save after alternate recovery writes to repaired slot and updates pointer consistently',
+        () async {
+          final prefs = await SharedPreferences.getInstance();
+          final ledger = LightweightBlockdagLedger();
+          final mapB = ledger.exportPersistedState().toMap();
+          final envB = jsonEncode({
+            'schemaVersion': 1,
+            'state': mapB,
+            'checksum': computeSha256(canonicalJsonEncode(mapB)),
+            'committedAt': DateTime.now().toUtc().toIso8601String(),
+          });
+
+          // Slot A is corrupt, Slot B is valid
+          await prefs.setString(
+            LocalBlockdagRepository.keyActiveSlot,
+            LocalBlockdagRepository.slotA,
+          );
+          await prefs.setString(LocalBlockdagRepository.keySlotA, '{bad_data');
+          await prefs.setString(LocalBlockdagRepository.keySlotB, envB);
+
+          final repo = LocalBlockdagRepository(preferences: prefs);
+
+          // 1. Recover from slot_b
+          final loadRes = await repo.loadResult();
+          expect(loadRes.isRecoveredFromAlternate, isTrue);
+          expect(loadRes.recoveredSlot, equals(LocalBlockdagRepository.slotB));
+
+          // 2. Add block and save new state
+          ledger.createBlock(
+            creatorNodeId: 'NODE-A',
+            validationProof: {'recovered': true},
+          );
+          final newState = ledger.exportPersistedState();
+
+          final saved = await repo.saveState(newState);
+          expect(saved, isTrue);
+
+          // 3. Must have staged and committed to slot_a (the repaired slot)
+          expect(
+            await repo.getActiveSlot(),
+            equals(LocalBlockdagRepository.slotA),
+          );
+
+          // 4. Reload verifies new state is active in slot_a with 2 blocks
+          final secondLoad = await repo.loadResult();
+          expect(secondLoad.status, equals(BlockdagLoadStatus.success));
+          expect(secondLoad.activeSlot, equals(LocalBlockdagRepository.slotA));
+          expect(secondLoad.isRecoveredFromAlternate, isFalse);
+          expect(secondLoad.state!.blocks.length, equals(2));
+        },
+      );
+
+      test(
+        '60. Unsafe recovery (ambiguousState) preserves storage without Genesis overwrite',
+        () async {
+          final prefs = await SharedPreferences.getInstance();
+          final ledger1 = LightweightBlockdagLedger();
+          final map1 = ledger1.exportPersistedState().toMap();
+          final env1 = jsonEncode({
+            'schemaVersion': 1,
+            'state': map1,
+            'checksum': computeSha256(canonicalJsonEncode(map1)),
+            'committedAt': DateTime.now().toUtc().toIso8601String(),
+          });
+
+          final ledger2 = LightweightBlockdagLedger();
+          ledger2.createBlock(
+            creatorNodeId: 'NODE-B',
+            validationProof: {'blk': 2},
+          );
+          final map2 = ledger2.exportPersistedState().toMap();
+          final env2 = jsonEncode({
+            'schemaVersion': 1,
+            'state': map2,
+            'checksum': computeSha256(canonicalJsonEncode(map2)),
+            'committedAt': DateTime.now().toUtc().toIso8601String(),
+          });
+
+          // Pointer missing, both slots valid with different states
+          await prefs.remove(LocalBlockdagRepository.keyActiveSlot);
+          await prefs.setString(LocalBlockdagRepository.keySlotA, env1);
+          await prefs.setString(LocalBlockdagRepository.keySlotB, env2);
+
+          final repo = LocalBlockdagRepository(preferences: prefs);
+          final coord = BlockdagSecurityCoordinator(
+            localNodeId: 'NODE-A',
+            ledger: LightweightBlockdagLedger(),
+            repository: repo,
+          );
+
+          final initStatus = await coord.initialize();
+          expect(initStatus, equals(BlockdagInitStatus.ambiguousStateHalted));
+          expect(coord.isInitialized, isFalse);
+
+          // Storage was NOT overwritten with fresh Genesis
+          expect(
+            prefs.getString(LocalBlockdagRepository.keySlotA),
+            equals(env1),
+          );
+          expect(
+            prefs.getString(LocalBlockdagRepository.keySlotB),
+            equals(env2),
+          );
+        },
+      );
+
+      test(
+        '61. Repository write failure (e.g. read-back failure) prevents DAG_SYNC_ACK in DagGossipSyncEngine',
+        () async {
+          final prefs = await SharedPreferences.getInstance();
+          final repoB = LocalBlockdagRepository(preferences: prefs);
+          final ledgerB = LightweightBlockdagLedger();
+          final transportB = FakeMeshTransport();
+
+          await repoB.saveState(ledgerB.exportPersistedState());
+
+          final engineB = DagGossipSyncEngine(
+            transport: transportB,
+            localNodeId: 'NODE-B',
+            ledger: ledgerB,
+            repository: repoB,
+            isEnabled: true,
+          );
+
+          final ledgerA = LightweightBlockdagLedger();
+          final blockA1 = ledgerA.createBlock(
+            creatorNodeId: 'NODE-A',
+            validationProof: {'test': 61},
+          );
+
+          transportB.simulateIncomingConnectionRequest(
+            endpointId: 'ep-a',
+            endpointName: 'Node A',
+          );
+          await transportB.acceptConnection(endpointId: 'ep-a');
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+
+          final sessionB = engineB.getSession('ep-a')!;
+          sessionB.activeRequestId = 'req-readback-fail-61';
+          sessionB.missingBlockHashes.add(blockA1.blockHash);
+
+          // Simulate read-back verification failure on Node B
+          repoB.simulateReadBackFailure = true;
+
+          transportB.clearSentPayloads();
+          transportB.simulateIncomingPayload(
+            endpointId: 'ep-a',
+            bytes: DagGossipCodec.encode(
+              DagBlockBatchMessage(
+                senderNodeId: 'NODE-A',
+                requestId: 'req-readback-fail-61',
+                batchIndex: 1,
+                totalBatches: 1,
+                blocks: [blockA1],
+              ),
+            ),
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+
+          // No DAG_SYNC_ACK sent
+          expect(engineB.totalSyncAckSent, equals(0));
+          final sentAcks = transportB.sentPayloads
+              .map((p) => DagGossipCodec.decode(p.bytes).message)
+              .whereType<DagSyncAckMessage>()
+              .toList();
+          expect(sentAcks, isEmpty);
+
+          // Ledger in memory rolled back
+          expect(ledgerB.activeBlocksCount, equals(1));
+          expect(
+            ledgerB.processedBlockHashes.contains(blockA1.blockHash),
+            isFalse,
+          );
+
+          engineB.dispose();
+        },
+      );
+
+      test('62. Legacy data migration and all previous tests pass', () async {
+        final ledger = LightweightBlockdagLedger();
+        final legacyJson = jsonEncode(ledger.exportPersistedState().toMap());
+
+        SharedPreferences.setMockInitialValues({
+          LocalBlockdagRepository.keyState: legacyJson,
+          LocalBlockdagRepository.keySchemaVersion: 1,
+        });
+
+        final repo = LocalBlockdagRepository();
+        final loadRes = await repo.loadResult();
+        expect(loadRes.status, equals(BlockdagLoadStatus.success));
+        expect(await repo.getActiveSlot(), isNull);
+
+        // Save migrates to slotA with read-back verification
+        ledger.createBlock(
+          creatorNodeId: 'NODE-A',
+          validationProof: {'migrated': 62},
+        );
+        final saved = await repo.saveState(ledger.exportPersistedState());
+        expect(saved, isTrue);
+        expect(
+          await repo.getActiveSlot(),
+          equals(LocalBlockdagRepository.slotA),
+        );
+
+        // Clear cleans all keys including legacy and dual slots
+        final cleared = await repo.clear();
+        expect(cleared, isTrue);
+        final afterClear = await repo.loadResult();
+        expect(afterClear.status, equals(BlockdagLoadStatus.empty));
+      });
+    });
   });
 }
