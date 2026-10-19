@@ -28,6 +28,7 @@ import 'orphan_block_pool.dart';
 
 /// State sesi gossip untuk satu endpoint peer 1-hop aktif.
 class PeerGossipSession {
+  final String sessionId;
   final String endpointId;
   String? remoteNodeId;
   int? remoteSchemaVersion;
@@ -55,8 +56,13 @@ class PeerGossipSession {
 
   DateTime lastActivity;
 
-  PeerGossipSession({required this.endpointId})
-    : lastActivity = DateTime.now().toUtc();
+  static int _sessionCounter = 0;
+
+  PeerGossipSession({required this.endpointId, String? sessionId})
+    : sessionId =
+          sessionId ??
+          '${endpointId}_${DateTime.now().toUtc().microsecondsSinceEpoch}_${++_sessionCounter}',
+      lastActivity = DateTime.now().toUtc();
 
   void addServedRequestId(String reqId) {
     if (servedRequestIds.length >= 50) {
@@ -122,6 +128,9 @@ class DagGossipSyncEngine {
   }
 
   bool get isEnabled => _isEnabled;
+
+  /// Memeriksa apakah repositori penyimpanan persisten tersedia untuk mengomit blok remote.
+  bool get hasPersistentStorage => repository != null;
 
   set isEnabled(bool value) {
     if (_isDisposed) return;
@@ -669,6 +678,8 @@ class DagGossipSyncEngine {
             block: block,
             missingParentHashes: missingParents,
             peerEndpointId: endpointId,
+            peerNodeId: session.remoteNodeId ?? batch.senderNodeId,
+            sessionId: session.sessionId,
             requestId: batch.requestId,
           );
 
@@ -716,15 +727,26 @@ class DagGossipSyncEngine {
 
     // 6. Persistensikan state ke repository jika terdapat blok yang berhasil divalidasi
     final confirmedAcceptedHashes = <String>[];
-    bool persistSuccess = true;
+    bool persistSuccess = false;
 
     if (tentativelyAcceptedBlocks.isNotEmpty) {
-      if (repository != null) {
+      if (repository == null) {
+        // Kontrak Persistensi Stage 5E.4.5.1:
+        // Engine replikasi aktif tanpa repository TIDAK BOLEH menganggap persistensi berhasil.
+        // Blok yang tidak dapat dipersistensikan TIDAK BOLEH di-ACK.
+        persistSuccess = false;
+        ledger.restoreFromPersistedState(preIngestSnapshot);
+        debugPrint(
+          '[DagGossipSyncEngine] repository tidak tersedia: batch ${batch.requestId} dibatalkan dan di-rollback (tidak ada ACK dikirim)',
+        );
+      } else {
         try {
           final saved = await repository!.saveState(
             ledger.exportPersistedState(),
           );
-          if (!saved) {
+          if (saved) {
+            persistSuccess = true;
+          } else {
             persistSuccess = false;
             debugPrint(
               '[DagGossipSyncEngine] repository.saveState() mengembalikan false untuk batch ${batch.requestId}',
@@ -753,15 +775,9 @@ class DagGossipSyncEngine {
             session.knownPeerBlockHashes.add(block.blockHash);
           }
         }
-      } else {
-        // Mode tanpa repository (in-memory test): RAM adalah satu-satunya store
-        for (final block in tentativelyAcceptedBlocks) {
-          _totalRemoteBlocksAccepted++;
-          confirmedAcceptedHashes.add(block.blockHash);
-          session.missingBlockHashes.remove(block.blockHash);
-          session.knownPeerBlockHashes.add(block.blockHash);
-        }
       }
+    } else {
+      persistSuccess = true;
     }
 
     // 7. Jika persistensi sukses, evaluasi dan proses orphan pool yang parent-nya baru saja tiba (Stage 5E.4.5)
@@ -866,8 +882,8 @@ class DagGossipSyncEngine {
           continue;
         }
 
-        // 3. Persistensi ke repository
-        bool saved = true;
+        // 3. Persistensi ke repository (Kontrak Stage 5E.4.5.1)
+        bool saved = false;
         if (repository != null) {
           try {
             saved = await repository!.saveState(ledger.exportPersistedState());
@@ -877,11 +893,15 @@ class DagGossipSyncEngine {
               '[DagGossipSyncEngine] Exception saat repository.saveState() untuk orphan ${candidate.blockHash}: $e',
             );
           }
+        } else {
+          debugPrint(
+            '[DagGossipSyncEngine] repository tidak tersedia: orphan ${candidate.blockHash} tidak dapat dipromosikan tanpa penyimpanan persisten',
+          );
         }
 
         if (!saved) {
           // ROLLBACK: Batalkan mutasi in-memory dan JANGAN hapus dari pool
-          // Blok tetap berada di orphan pool agar dapat dicoba lagi setelah storage pulih.
+          // Blok tetap berada di orphan pool agar dapat dicoba lagi setelah storage pulih / repository tersedia.
           ledger.restoreFromPersistedState(preSnapshot);
           return promotedBlocks;
         }
@@ -901,23 +921,46 @@ class DagGossipSyncEngine {
           peerSession.knownPeerBlockHashes.add(candidate.blockHash);
         }
 
-        // 5. Kirim DAG_SYNC_ACK jika orphan ini berasal dari request sebelumnya yang belum di-ACK
-        if (entry.requestId != null &&
-            entry.peerEndpointId.isNotEmpty &&
-            (currentSession == null ||
-                entry.requestId != currentSession.activeRequestId)) {
-          final tips = ledger.tipHashes.toList()..sort();
-          final effectiveTips = tips.isEmpty
-              ? [ledger.genesisBlock.blockHash]
-              : tips;
-          final orphanAck = DagSyncAckMessage(
-            senderNodeId: localNodeId,
-            requestId: entry.requestId!,
-            acceptedBlockHashes: [candidate.blockHash],
-            newTipHashes: effectiveTips,
-          );
-          final sent = await _sendMessage(entry.peerEndpointId, orphanAck);
-          if (sent) _totalSyncAckSent++;
+        // 5. Kirim DAG_SYNC_ACK jika orphan ini berasal dari request sebelumnya yang belum di-ACK (Stage 5E.4.5.1)
+        if (entry.requestId != null && entry.peerEndpointId.isNotEmpty) {
+          final targetPeerSession =
+              _sessions[entry.peerEndpointId] ??
+              (entry.peerEndpointId == currentEndpointId
+                  ? currentSession
+                  : null);
+
+          // Validasi korelasi sesi dan request:
+          // Pastikan peer masih terhubung, sesi masih sama (bukan sesi baru setelah reconnect),
+          // dan remoteNodeId cocok jika diketahui.
+          final isSameSession =
+              targetPeerSession != null &&
+              (entry.sessionId == null ||
+                  targetPeerSession.sessionId == entry.sessionId) &&
+              (entry.peerNodeId == null ||
+                  targetPeerSession.remoteNodeId == null ||
+                  targetPeerSession.remoteNodeId == entry.peerNodeId);
+
+          if (isSameSession &&
+              (currentSession == null ||
+                  entry.requestId != currentSession.activeRequestId)) {
+            final tips = ledger.tipHashes.toList()..sort();
+            final effectiveTips = tips.isEmpty
+                ? [ledger.genesisBlock.blockHash]
+                : tips;
+            final orphanAck = DagSyncAckMessage(
+              senderNodeId: localNodeId,
+              requestId: entry.requestId!,
+              acceptedBlockHashes: [candidate.blockHash],
+              newTipHashes: effectiveTips,
+            );
+            final sent = await _sendMessage(entry.peerEndpointId, orphanAck);
+            if (sent) _totalSyncAckSent++;
+          } else if (!isSameSession) {
+            debugPrint(
+              '[DagGossipSyncEngine] Tidak mengirim DAG_SYNC_ACK tertunda untuk orphan ${candidate.blockHash}: '
+              'sesi pengirim asal (endpoint: ${entry.peerEndpointId}, session: ${entry.sessionId}) sudah tidak aktif atau berganti sesi',
+            );
+          }
         }
       }
     }

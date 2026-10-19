@@ -59,6 +59,8 @@ class OrphanBlockEntry {
   final DateTime entryTime;
   final DateTime expiresAt;
   final String peerEndpointId;
+  final String? peerNodeId;
+  final String? sessionId;
   final String? requestId;
 
   OrphanBlockEntry({
@@ -68,6 +70,8 @@ class OrphanBlockEntry {
     required this.entryTime,
     required this.expiresAt,
     required this.peerEndpointId,
+    this.peerNodeId,
+    this.sessionId,
     this.requestId,
   }) : missingParentHashes = Set.unmodifiable(missingParentHashes);
 
@@ -142,6 +146,8 @@ class OrphanBlockPool {
     required SecurityBlock block,
     required Set<String> missingParentHashes,
     required String peerEndpointId,
+    String? peerNodeId,
+    String? sessionId,
     String? requestId,
   }) {
     _purgeExpired();
@@ -188,6 +194,8 @@ class OrphanBlockPool {
       entryTime: now,
       expiresAt: now.add(ttl),
       peerEndpointId: peerEndpointId,
+      peerNodeId: peerNodeId,
+      sessionId: sessionId,
       requestId: requestId,
     );
 
