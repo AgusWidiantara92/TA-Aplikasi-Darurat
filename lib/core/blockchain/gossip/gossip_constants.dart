@@ -44,6 +44,22 @@ const int kMaxOrphansPerPeer = 8;
 /// Batas maksimum panjang karakter untuk identifier (NodeId, RequestId).
 const int kMaxIdentifierLength = 64;
 
+/// Interval waktu dasar rekonsiliasi inventaris periodik (Stage 5E.4.6).
+/// Nilai awal 30 detik merupakan parameter eksperimen yang dapat dikonfigurasi.
+const Duration kDefaultPeriodicGossipInterval = Duration(seconds: 30);
+
+/// Batas minimum jeda backoff setelah kegagalan rekonsiliasi (5 detik).
+const Duration kMinPeriodicGossipBackoff = Duration(seconds: 5);
+
+/// Batas maksimum jeda backoff setelah kegagalan berulang (120 detik / 2 menit).
+const Duration kMaxPeriodicGossipBackoff = Duration(seconds: 120);
+
+/// Rentang default jitter acak untuk mencegah sinkronisasi serentak antarsesama peer (0 - 5 detik).
+const Duration kDefaultPeriodicGossipJitterRange = Duration(seconds: 5);
+
+/// Batas waktu kedaluwarsa permintaan blok aktif (in-flight request timeout) sebelum dianggap tidak merespons (15 detik).
+const Duration kGossipRequestTimeout = Duration(seconds: 15);
+
 /// Batas maksimum panjang karakter untuk pesan deskripsi alasan teknis (*reason*).
 /// Mencegah penyisipan teks bebas panjang yang dapat melanggar privasi korban/pengguna.
 const int kMaxMetadataReasonLength = 128;

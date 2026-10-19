@@ -25,6 +25,7 @@ import 'gossip_constants.dart';
 import 'gossip_messages.dart';
 import 'gossip_privacy_sanitizer.dart';
 import 'orphan_block_pool.dart';
+import 'periodic_gossip_scheduler.dart';
 
 /// State sesi gossip untuk satu endpoint peer 1-hop aktif.
 class PeerGossipSession {
@@ -70,6 +71,22 @@ class PeerGossipSession {
 
   DateTime lastActivity;
 
+  // Pelacakan rekonsiliasi periodik dan backoff (Stage 5E.4.6)
+  /// Status apakah sesi ini sedang dalam proses rekonsiliasi aktif (paling banyak 1 per sesi).
+  bool isReconciling = false;
+
+  /// Jumlah kegagalan beruntun pada transmisi rekonsiliasi ke peer ini.
+  int consecutiveFailures = 0;
+
+  /// Durasi jeda backoff saat ini setelah kegagalan rekonsiliasi.
+  Duration currentBackoff = Duration.zero;
+
+  /// Waktu paling awal di mana rekonsiliasi berikutnya boleh dijalankan untuk sesi ini.
+  DateTime? nextEligibleReconcileTime;
+
+  /// Waktu pelaksanaan rekonsiliasi periodik terakhir yang dicoba.
+  DateTime? lastPeriodicReconcileTime;
+
   static int _sessionCounter = 0;
 
   PeerGossipSession({required this.endpointId, String? sessionId})
@@ -101,6 +118,12 @@ class PeerGossipSession {
     activeRequestedHashes.clear();
     activeRequestTime = null;
   }
+
+  /// Mengembalikan state backoff ke kondisi awal (setelah rekonsiliasi berhasil).
+  void resetBackoff() {
+    consecutiveFailures = 0;
+    currentBackoff = Duration.zero;
+  }
 }
 
 /// Layanan modular sinkronisasi replikasi gossip BlockDAG SiagaMesh.
@@ -110,6 +133,8 @@ class DagGossipSyncEngine {
   final LightweightBlockdagLedger ledger;
   final BlockdagRepository? repository;
   final OrphanBlockPool? orphanPool;
+  late final PeriodicGossipScheduler _scheduler;
+  final DateTime Function() _nowProvider;
 
   bool _isEnabled = false;
   bool _isDisposed = false;
@@ -137,6 +162,12 @@ class DagGossipSyncEngine {
   int _totalGossipBytesSent = 0;
   int _totalGossipBytesReceived = 0;
 
+  // Metrik instrumentasi rekonsiliasi periodik (Stage 5E.4.6)
+  int _totalPeriodicInvSent = 0;
+  int _totalPeriodicReconcileAttempts = 0;
+  int _totalPeriodicReconcileSuccess = 0;
+  int _totalPeriodicReconcileFailures = 0;
+
   DagGossipSyncEngine({
     required this.transport,
     required this.localNodeId,
@@ -145,10 +176,24 @@ class DagGossipSyncEngine {
     OrphanBlockPool? orphanPool,
     bool enableOrphanPool = false,
     bool isEnabled = false,
+    PeriodicGossipConfig? periodicConfig,
+    PeriodicGossipScheduler? scheduler,
+    DateTime Function()? nowProvider,
   }) : orphanPool = orphanPool ?? (enableOrphanPool ? OrphanBlockPool() : null),
+       _nowProvider = nowProvider ?? (() => DateTime.now().toUtc()),
        _isEnabled = isEnabled {
+    _scheduler =
+        scheduler ??
+        PeriodicGossipScheduler(
+          config: periodicConfig ?? const PeriodicGossipConfig(),
+          onReconcilePeer: (endpointId, [now]) =>
+              reconcilePeer(endpointId, now),
+          getEligibleEndpoints: _getEligibleEndpoints,
+          nowProvider: _nowProvider,
+        );
     if (_isEnabled) {
       _initListeners();
+      _scheduler.start();
     }
   }
 
@@ -163,7 +208,9 @@ class DagGossipSyncEngine {
     _isEnabled = value;
     if (_isEnabled) {
       _initListeners();
+      _scheduler.start();
     } else {
+      _scheduler.stop();
       _disposeListeners();
       _sessions.clear();
       orphanPool?.clear();
@@ -190,6 +237,24 @@ class DagGossipSyncEngine {
   int get totalRemoteBlocksRejected => _totalRemoteBlocksRejected;
   int get totalGossipBytesSent => _totalGossipBytesSent;
   int get totalGossipBytesReceived => _totalGossipBytesReceived;
+
+  // Getters rekonsiliasi periodik (Stage 5E.4.6)
+  PeriodicGossipScheduler get scheduler => _scheduler;
+  PeriodicGossipConfig get periodicConfig => _scheduler.config;
+  int get totalPeriodicInvSent => _totalPeriodicInvSent;
+  int get totalPeriodicReconcileAttempts => _totalPeriodicReconcileAttempts;
+  int get totalPeriodicReconcileSuccess => _totalPeriodicReconcileSuccess;
+  int get totalPeriodicReconcileFailures => _totalPeriodicReconcileFailures;
+
+  List<String> _getEligibleEndpoints() {
+    return _sessions.entries
+        .where(
+          (entry) =>
+              entry.value.helloReceived && entry.value.remoteSchemaVersion == 1,
+        )
+        .map((entry) => entry.key)
+        .toList();
+  }
 
   Map<String, PeerGossipSession> get activeSessions =>
       Map.unmodifiable(_sessions);
@@ -284,6 +349,7 @@ class DagGossipSyncEngine {
     } else if (event.status == PeerConnectionStatus.disconnected ||
         event.status == PeerConnectionStatus.rejected) {
       _sessions.remove(event.endpointId);
+      _scheduler.onPeerDisconnected(event.endpointId);
       // Kebijakan Orphan Block Pool (Stage 5E.4.5):
       // Pemutusan koneksi peer (disconnect) TIDAK serta-merta membuang blok yatim dari orphanPool.
       // Blok yatim yang telah lolos validasi intrinsik tetap dipertahankan selama belum kedaluwarsa (TTL 60 detik)
@@ -1190,6 +1256,7 @@ class DagGossipSyncEngine {
             hello.schemaVersion != 1) {
           // Jangan memproses peer dengan jaringan/skema yang tidak kompatibel; bersihkan sesi
           _sessions.remove(endpointId);
+          _scheduler.onPeerDisconnected(endpointId);
           return;
         }
 
@@ -1210,6 +1277,14 @@ class DagGossipSyncEngine {
           session.pendingInv = null;
           await _processInv(session, pending);
         }
+
+        // Inisialisasi jadwal rekonsiliasi periodik pertama setelah handshake selesai
+        final jitter = _scheduler.config.computeJitter(endpointId);
+        final initialInterval = _scheduler.config.interval + jitter;
+        session.nextEligibleReconcileTime = _nowProvider().add(initialInterval);
+
+        // Beritahu scheduler bahwa sesi peer telah siap dan kompatibel untuk rekonsiliasi periodik
+        _scheduler.onPeerReady(endpointId, initialInterval);
         break;
 
       case DagGossipMessageType.inv:
@@ -1317,10 +1392,164 @@ class DagGossipSyncEngine {
     return true;
   }
 
+  /// Menjalankan rekonsiliasi inventaris untuk satu peer 1-hop yang memenuhi syarat (Stage 5E.4.6).
+  ///
+  /// Mengirimkan pesan [DAG_INV] dengan ringkasan tips dan blok terbaru lokal.
+  /// Menerapkan proteksi konkurensi (paling banyak 1 rekonsiliasi aktif per sesi),
+  /// penanganan in-flight request timeout, serta perhitungan backoff terbatas.
+  Future<bool> reconcilePeer(String endpointId, [DateTime? now]) async {
+    if (!_isEnabled || _isDisposed) return false;
+
+    final session = _sessions[endpointId];
+    if (session == null) return false;
+
+    // 1. Validasi sesi kompatibel: DAG_HELLO sudah diverifikasi dan skema sesuai
+    if (!session.helloReceived || session.remoteSchemaVersion != 1) {
+      return false;
+    }
+
+    // 2. Mencegah rekonsiliasi ganda serentak untuk sesi yang sama
+    if (session.isReconciling) {
+      return false;
+    }
+
+    final currentTime = now ?? _nowProvider();
+
+    // 3. Tangani in-flight request yang masih aktif (jangan duplikasi request)
+    if (session.activeRequestId != null) {
+      if (session.activeRequestTime != null &&
+          currentTime.difference(session.activeRequestTime!) >=
+              _scheduler.config.requestTimeout) {
+        // Permintaan blok in-flight telah melebihi batas waktu (peer tidak merespons)
+        session.clearActiveRequest();
+        _recordReconciliationFailure(endpointId, session, currentTime);
+        return false;
+      } else {
+        // Permintaan in-flight masih aktif dalam batas wajar: jangan gandakan request!
+        return false;
+      }
+    }
+
+    // 4. Periksa apakah sesi masih dalam masa jeda backoff
+    if (session.nextEligibleReconcileTime != null &&
+        currentTime.isBefore(session.nextEligibleReconcileTime!)) {
+      return false;
+    }
+
+    session.isReconciling = true;
+    _totalPeriodicReconcileAttempts++;
+
+    bool sent = false;
+    try {
+      sent = await _sendPeriodicInv(endpointId, session);
+      if (sent) {
+        _totalPeriodicReconcileSuccess++;
+        _recordReconciliationSuccess(endpointId, session, currentTime);
+      } else {
+        _totalPeriodicReconcileFailures++;
+        _recordReconciliationFailure(endpointId, session, currentTime);
+      }
+      return sent;
+    } catch (e) {
+      debugPrint(
+        '[DagGossipSyncEngine] Exception saat rekonsiliasi periodik ke $endpointId: $e',
+      );
+      _totalPeriodicReconcileFailures++;
+      _recordReconciliationFailure(endpointId, session, currentTime);
+      return false;
+    } finally {
+      session.isReconciling = false;
+    }
+  }
+
+  /// Mengirimkan pesan [DAG_INV] periodik ke peer tertentu.
+  Future<bool> _sendPeriodicInv(
+    String endpointId,
+    PeerGossipSession session,
+  ) async {
+    if (!_isEnabled || _isDisposed) return false;
+
+    final tips = ledger.tipHashes.toList()..sort();
+    final effectiveTips = tips.isEmpty ? [ledger.genesisBlock.blockHash] : tips;
+
+    final recentBlocks = ledger
+        .getAllActiveBlocks()
+        .map((b) => b.blockHash)
+        .take(kMaxInvHashes)
+        .toList();
+
+    final invMsg = DagInvMessage(
+      senderNodeId: localNodeId,
+      senderTimestamp: _nowProvider().millisecondsSinceEpoch,
+      tipHashes: effectiveTips,
+      recentBlockHashes: recentBlocks,
+    );
+
+    final bytes = DagGossipCodec.encode(invMsg);
+    final sent = await _sendRawBytes(endpointId, bytes);
+
+    if (!_isEnabled || _isDisposed) return false;
+    final currentSession = _sessions[endpointId];
+    if (currentSession == null || currentSession != session) {
+      return false;
+    }
+
+    if (sent) {
+      session.invSent = true;
+      session.lastActivity = _nowProvider();
+      _totalInvSent++;
+      _totalPeriodicInvSent++;
+    }
+    return sent;
+  }
+
+  void _recordReconciliationSuccess(
+    String endpointId,
+    PeerGossipSession session,
+    DateTime now,
+  ) {
+    session.resetBackoff();
+    session.lastPeriodicReconcileTime = now;
+    final jitter = _scheduler.config.computeJitter(endpointId);
+    final nextInterval = _scheduler.config.interval + jitter;
+    session.nextEligibleReconcileTime = now.add(nextInterval);
+
+    _scheduler.schedulePeer(endpointId, nextInterval);
+  }
+
+  void _recordReconciliationFailure(
+    String endpointId,
+    PeerGossipSession session,
+    DateTime now,
+  ) {
+    session.consecutiveFailures++;
+    final backoff = _scheduler.config.computeBackoff(
+      session.consecutiveFailures,
+    );
+    session.currentBackoff = backoff;
+    session.nextEligibleReconcileTime = now.add(backoff);
+
+    _scheduler.schedulePeer(endpointId, backoff);
+  }
+
+  /// Menjalankan satu tick rekonsiliasi periodik secara eksplisit (untuk pengujian deterministik).
+  Future<void> tickPeriodicReconciliation([DateTime? now]) async {
+    await _scheduler.tick(now);
+  }
+
+  /// Memicu rekonsiliasi inventaris untuk satu endpoint tertentu secara eksplisit.
+  Future<bool> triggerPeriodicReconciliation(
+    String endpointId, [
+    DateTime? now,
+  ]) async {
+    return reconcilePeer(endpointId, now);
+  }
+
   /// Membersihkan seluruh resources, membatalkan subscription, dan mengosongkan sesi.
   void dispose() {
     _isDisposed = true;
     _isEnabled = false;
+    _scheduler.dispose();
     _disposeListeners();
     _sessions.clear();
     orphanPool?.dispose();
