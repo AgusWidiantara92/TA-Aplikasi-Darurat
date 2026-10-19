@@ -703,5 +703,55 @@ void main() {
         expect(table.getPeerByEndpoint('ep-001')?.isConnected, isFalse);
       },
     );
+
+    test(
+      '13. cancelQueuedMessage membatalkan pesan antrean store-and-forward dan mencegah flush saat peer baru terhubung',
+      () async {
+        final engineA = nodeA.engine;
+
+        // Kirim pesan saat 0 peer terhubung -> pesan harus masuk antrean store-and-forward
+        final env = await engineA.sendChatMessage(
+          recipientNodeId: 'NODE-B',
+          text: 'Pesan darurat yang akan dibatalkan',
+        );
+
+        final msgId = env.payload['messageId'] as String;
+        expect(engineA.isMessageQueued(msgId), isTrue);
+        expect(engineA.storeAndForwardQueue.length, equals(1));
+
+        // Batalkan pesan dari antrean
+        final cancelled = engineA.cancelQueuedMessage(msgId);
+        expect(cancelled, isTrue);
+        expect(engineA.isMessageQueued(msgId), isFalse);
+        expect(engineA.storeAndForwardQueue.length, equals(0));
+
+        // Membatalkan kedua kali mengembalikan false
+        expect(engineA.cancelQueuedMessage(msgId), isFalse);
+
+        // Sambungkan Node B: buktikan bahwa tidak ada pesan yang di-flush ke transport
+        final prevSentPayloads = List.from(nodeA.transport.sentPayloads);
+        nodeA.transport.simulatePeerDiscovered(
+          DiscoveredPeer(
+            endpointId: 'ep-node-b',
+            endpointName: 'Node B',
+            serviceId: 'com.siagamesh.emergency.mesh',
+            discoveredAt: DateTime.now(),
+            status: PeerConnectionStatus.connected,
+          ),
+        );
+        // Beri waktu proses event koneksi
+        await Future.delayed(const Duration(milliseconds: 50));
+
+        // Cek payload yang dikirim ke ep-node-b setelah handshake; tidak boleh ada pesan yang dibatalkan tadi
+        final newPayloads = nodeA.transport.sentPayloads.sublist(
+          prevSentPayloads.length,
+        );
+        final containsCancelledMessage = newPayloads.any((p) {
+          final str = utf8.decode(p.bytes);
+          return str.contains('Pesan darurat yang akan dibatalkan');
+        });
+        expect(containsCancelledMessage, isFalse);
+      },
+    );
   });
 }

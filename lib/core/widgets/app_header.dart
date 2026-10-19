@@ -16,27 +16,35 @@ class AppHeader extends StatelessWidget {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Row(
-            children: [
-              const Text(
-                'SiagaMesh',
-                style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                  color: AppColors.primaryNavy,
-                  letterSpacing: -0.5,
+          Expanded(
+            child: Row(
+              children: [
+                const Text(
+                  'SiagaMesh',
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                    color: AppColors.primaryNavy,
+                    letterSpacing: -0.5,
+                  ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              StatusBadge(
-                label: 'SIAGAMESH MANET',
-                backgroundColor: AppColors.accentPillBg,
-                textColor: AppColors.accentPillText,
-                fontSize: 10,
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              ),
-            ],
+                const SizedBox(width: 8),
+                Flexible(
+                  child: StatusBadge(
+                    label: 'MANET',
+                    backgroundColor: AppColors.accentPillBg,
+                    textColor: AppColors.accentPillText,
+                    fontSize: 10,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 3,
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
+          const SizedBox(width: 8),
           InkWell(
             onTap:
                 onProfileTap ??

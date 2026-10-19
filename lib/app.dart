@@ -74,7 +74,7 @@ class _MainNavigationScaffoldState extends State<MainNavigationScaffold> {
             top: BorderSide(color: AppColors.borderLight, width: 1),
           ),
         ),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
         child: SafeArea(
           top: false,
           child: Row(
@@ -99,8 +99,8 @@ class _MainNavigationScaffoldState extends State<MainNavigationScaffold> {
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
         padding: isActive
-            ? const EdgeInsets.symmetric(horizontal: 24, vertical: 8)
-            : const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            ? const EdgeInsets.symmetric(horizontal: 16, vertical: 8)
+            : const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
           color: isActive ? AppColors.primaryNavy : Colors.transparent,
           borderRadius: BorderRadius.circular(24),

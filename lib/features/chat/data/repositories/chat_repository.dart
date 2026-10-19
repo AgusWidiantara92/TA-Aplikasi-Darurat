@@ -27,6 +27,9 @@ abstract class ChatRepository {
   /// Mencari atau membuat percakapan kanal siaran darurat lokal.
   Future<ChatConversation> getOrCreateBroadcastConversation();
 
+  /// Menghapus pesan dari percakapan berdasarkan ID dan memperbarui ringkasan percakapan.
+  Future<bool> deleteMessage(String conversationId, String messageId);
+
   /// Menghapus seluruh data lokal percakapan dan pesan (untuk pengujian atau reset).
   Future<void> clearAllData();
 }
@@ -167,6 +170,54 @@ class LocalChatRepository implements ChatRepository {
       await _persistMessages(prefs, conversationId, currentMessages);
       await _persistConversations(prefs);
     }
+  }
+
+  @override
+  Future<bool> deleteMessage(String conversationId, String messageId) async {
+    if (!_isLoadedFromDisk) {
+      await _initFromDisk();
+    }
+
+    final currentMessages = _messagesCache.containsKey(conversationId)
+        ? _messagesCache[conversationId]!
+        : await getMessages(conversationId);
+
+    final initialCount = currentMessages.length;
+    currentMessages.removeWhere((m) => m.id == messageId);
+    final removed = currentMessages.length < initialCount;
+
+    if (removed) {
+      final index = _conversationsCache.indexWhere(
+        (c) => c.id == conversationId,
+      );
+      if (index != -1) {
+        if (currentMessages.isNotEmpty) {
+          final lastMsg = currentMessages.last;
+          final summaryText = lastMsg.text.isNotEmpty
+              ? lastMsg.text
+              : (lastMsg.telemetryData != null
+                    ? '[Data Telemetri Lokasi]'
+                    : 'Pesan Darurat');
+          _conversationsCache[index] = _conversationsCache[index].copyWith(
+            lastMessage: summaryText,
+            time: lastMsg.time,
+          );
+        } else {
+          _conversationsCache[index] = _conversationsCache[index].copyWith(
+            lastMessage: 'Belum ada pesan',
+            time: 'Baru saja',
+          );
+        }
+      }
+
+      final prefs = await _getPrefs();
+      if (prefs != null) {
+        await _persistMessages(prefs, conversationId, currentMessages);
+        await _persistConversations(prefs);
+      }
+    }
+
+    return removed;
   }
 
   @override

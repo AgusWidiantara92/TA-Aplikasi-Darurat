@@ -176,6 +176,13 @@ class FakeChatRepository implements ChatRepository {
   }
 
   @override
+  Future<bool> deleteMessage(String conversationId, String messageId) async {
+    final initialCount = savedMessages.length;
+    savedMessages.removeWhere((m) => m.id == messageId);
+    return savedMessages.length < initialCount;
+  }
+
+  @override
   Future<void> clearAllData() async {
     savedMessages.clear();
   }

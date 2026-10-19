@@ -215,5 +215,104 @@ void main() {
         expect(emptyMessages.isEmpty, isTrue);
       },
     );
+
+    test(
+      '6. Menghapus pesan memperbarui riwayat lokal dan ringkasan percakapan',
+      () async {
+        final prefs = await SharedPreferences.getInstance();
+        final repository = LocalChatRepository(preferences: prefs);
+
+        final conv = await repository.getOrCreateBroadcastConversation();
+        const msg1 = ChatMessage(
+          id: 'bcast-001',
+          senderName: 'Anda',
+          text: 'Pesan Broadcast Pertama',
+          time: '14:00',
+          isMe: true,
+        );
+        const msg2 = ChatMessage(
+          id: 'bcast-002',
+          senderName: 'Anda',
+          text: 'Pesan Broadcast Kedua',
+          time: '14:05',
+          isMe: true,
+        );
+
+        await repository.saveMessage(conv.id, msg1);
+        await repository.saveMessage(conv.id, msg2);
+
+        var messages = await repository.getMessages(conv.id);
+        expect(messages.length, equals(2));
+
+        var conversations = await repository.getConversations();
+        expect(
+          conversations.firstWhere((c) => c.id == conv.id).lastMessage,
+          equals('Pesan Broadcast Kedua'),
+        );
+
+        // Hapus pesan kedua
+        final deletedMsg2 = await repository.deleteMessage(
+          conv.id,
+          'bcast-002',
+        );
+        expect(deletedMsg2, isTrue);
+
+        messages = await repository.getMessages(conv.id);
+        expect(messages.length, equals(1));
+        expect(messages.first.id, equals('bcast-001'));
+
+        conversations = await repository.getConversations();
+        expect(
+          conversations.firstWhere((c) => c.id == conv.id).lastMessage,
+          equals('Pesan Broadcast Pertama'),
+        );
+      },
+    );
+
+    test(
+      '7. Menghapus pesan persisten di disk dan tidak muncul kembali setelah restart',
+      () async {
+        final prefs = await SharedPreferences.getInstance();
+        final repo1 = LocalChatRepository(preferences: prefs);
+
+        final conv = await repo1.getOrCreateBroadcastConversation();
+        const msg = ChatMessage(
+          id: 'bcast-persist-del',
+          senderName: 'Anda',
+          text: 'Pesan Darurat yang akan dihapus',
+          time: '15:00',
+          isMe: true,
+        );
+        await repo1.saveMessage(conv.id, msg);
+
+        // Hapus pesan
+        final deleted = await repo1.deleteMessage(conv.id, 'bcast-persist-del');
+        expect(deleted, isTrue);
+
+        // Buka ulang repository baru dengan disk yang sama
+        final repo2 = LocalChatRepository(preferences: prefs);
+        final messagesAfterRestart = await repo2.getMessages(conv.id);
+        expect(
+          messagesAfterRestart.any((m) => m.id == 'bcast-persist-del'),
+          isFalse,
+        );
+
+        final conversations = await repo2.getConversations();
+        final currentConv = conversations.firstWhere((c) => c.id == conv.id);
+        expect(currentConv.lastMessage, equals('Belum ada pesan'));
+      },
+    );
+
+    test(
+      '8. Menghapus ID pesan yang tidak ada mengembalikan false secara aman',
+      () async {
+        final prefs = await SharedPreferences.getInstance();
+        final repository = LocalChatRepository(preferences: prefs);
+
+        final conv = await repository.getOrCreateBroadcastConversation();
+        final res = await repository.deleteMessage(conv.id, 'id-non-existent');
+        expect(res, isFalse);
+      },
+    );
   });
 }

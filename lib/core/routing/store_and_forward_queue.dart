@@ -102,6 +102,28 @@ class StoreAndForwardQueue {
     _queue.removeWhere((item) => item.envelope.envelopeId == envelopeId);
   }
 
+  /// Menghapus pesan dari antrean berdasarkan payload messageId atau envelopeId.
+  /// Mengembalikan `true` jika setidaknya satu pesan berhasil dihapus/dibatalkan.
+  bool removeByMessageId(String messageId) {
+    final initialLen = _queue.length;
+    _queue.removeWhere((item) {
+      final env = item.envelope;
+      final envMsgId = env.payload['messageId'] as String? ?? env.envelopeId;
+      return envMsgId == messageId || env.envelopeId == messageId;
+    });
+    return _queue.length < initialLen;
+  }
+
+  /// Memeriksa apakah pesan dengan messageId atau envelopeId masih ada di antrean.
+  bool containsMessageId(String messageId) {
+    cleanExpired();
+    return _queue.any((item) {
+      final env = item.envelope;
+      final envMsgId = env.payload['messageId'] as String? ?? env.envelopeId;
+      return envMsgId == messageId || env.envelopeId == messageId;
+    });
+  }
+
   /// Membersihkan pesan-pesan yang telah kedaluwarsa.
   void cleanExpired() {
     final now = DateTime.now().millisecondsSinceEpoch;

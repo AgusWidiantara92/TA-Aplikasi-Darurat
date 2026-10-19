@@ -851,6 +851,39 @@ class ManetRoutingEngine {
     }
   }
 
+  /// Membatalkan pesan dari antrean store-and-forward berdasarkan messageId atau envelopeId.
+  bool cancelQueuedMessage(String messageId) {
+    final pending = storeAndForwardQueue.allPending;
+    for (final env in pending) {
+      final envMsgId = env.payload['messageId'] as String? ?? env.envelopeId;
+      if (envMsgId == messageId || env.envelopeId == messageId) {
+        storeAndForwardQueue.remove(env.envelopeId);
+        experimentLogger?.log(
+          envelopeId: env.envelopeId,
+          messageId: envMsgId,
+          senderId: env.senderId,
+          recipientId: env.recipientId,
+          eventType: MeshExperimentEventType.queued,
+          hopCount: env.hopCount,
+          routeTrace: env.routeTrace,
+          connectionStatus: 'LOCAL',
+          activeNeighborCount: neighborTable.activeNeighbors.length,
+          outcome: 'CANCELLED_FROM_QUEUE',
+        );
+        debugPrint(
+          '[RoutingEngine] Pesan antrean $messageId dibatalkan dari store-and-forward',
+        );
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Memeriksa apakah pesan dengan messageId atau envelopeId ada di antrean transmisi.
+  bool isMessageQueued(String messageId) {
+    return storeAndForwardQueue.containsMessageId(messageId);
+  }
+
   void dispose() {
     _eventsSub?.cancel();
     _payloadSub?.cancel();

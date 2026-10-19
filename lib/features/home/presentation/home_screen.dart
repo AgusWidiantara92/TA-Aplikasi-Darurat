@@ -6,6 +6,7 @@ import '../../../core/routing/routing_holder.dart';
 import '../../../core/transport/mesh_transport.dart';
 import '../../../core/transport/transport_holder.dart';
 import '../../../core/widgets/app_header.dart';
+import '../../../core/widgets/siagamesh_dialog.dart';
 import '../../../core/widgets/status_badge.dart';
 import '../../chat/data/repositories/chat_repository.dart';
 import '../../chat/models/chat_message.dart';
@@ -147,132 +148,58 @@ class _HomeScreenState extends State<HomeScreen> {
     final connected = _connectedPeers;
 
     if (connected.isEmpty) {
-      showDialog(
+      SiagaMeshDialog.show(
         context: context,
-        builder: (ctx) => AlertDialog(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(20),
+        icon: Icons.warning_amber_rounded,
+        iconColor: AppColors.emergencyRed,
+        title: 'Belum Ada Perangkat Terhubung',
+        message:
+            'Siaran darurat belum dapat dikirim ke peer lain secara langsung karena tidak ada perangkat yang terhubung saat ini. Anda dapat menyimpannya ke antrean lokal agar otomatis terkirim begitu peer terhubung.',
+        actions: [
+          SiagaMeshDialogAction(
+            label: 'Simpan ke Antrean',
+            isDestructive: true,
+            onPressed: () {
+              Navigator.pop(context);
+              _dispatchEmergencySos(isQueued: true);
+            },
           ),
-          title: Row(
-            children: const [
-              Icon(
-                Icons.warning_amber_rounded,
-                color: AppColors.emergencyRed,
-                size: 28,
-              ),
-              SizedBox(width: 8),
-              Text(
-                'Peringatan Darurat (SOS)',
-                style: TextStyle(
-                  color: AppColors.primaryNavy,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 18,
-                ),
-              ),
-            ],
+          SiagaMeshDialogAction(
+            label: 'Buka Perangkat',
+            isOutlined: true,
+            onPressed: () {
+              Navigator.pop(context);
+              widget.onNavigateToDevices?.call();
+            },
           ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: const [
-              Text(
-                'Belum ada perangkat sekitar yang terhubung ke jaringan mesh saat ini.',
-                style: TextStyle(
-                  fontSize: 14,
-                  color: AppColors.textPrimary,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              SizedBox(height: 10),
-              Text(
-                'Pesan darurat dapat disimpan ke antrean transmisi lokal untuk segera disiarkan saat perangkat lain terhubung, atau buka tab Perangkat untuk mencari node terdekat.',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: AppColors.textSecondary,
-                  height: 1.4,
-                ),
-              ),
-            ],
+          SiagaMeshDialogAction(
+            label: 'Batal',
+            onPressed: () => Navigator.pop(context),
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Batal'),
-            ),
-            OutlinedButton(
-              style: OutlinedButton.styleFrom(
-                side: const BorderSide(color: AppColors.primaryNavy),
-              ),
-              onPressed: () {
-                Navigator.pop(ctx);
-                widget.onNavigateToDevices?.call();
-              },
-              child: const Text(
-                'Buka Perangkat',
-                style: TextStyle(color: AppColors.primaryNavy),
-              ),
-            ),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.emergencyRed,
-                foregroundColor: Colors.white,
-              ),
-              onPressed: () {
-                Navigator.pop(ctx);
-                _dispatchEmergencySos(isQueued: true);
-              },
-              child: const Text('Simpan ke Antrean Siaran'),
-            ),
-          ],
-        ),
+        ],
       );
     } else {
-      showDialog(
+      SiagaMeshDialog.show(
         context: context,
-        builder: (ctx) => AlertDialog(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(20),
-          ),
-          title: Row(
-            children: const [
-              Icon(
-                Icons.emergency_share,
-                color: AppColors.emergencyRed,
-                size: 28,
-              ),
-              SizedBox(width: 8),
-              Text(
-                'Konfirmasi Siaran Darurat',
-                style: TextStyle(
-                  color: AppColors.primaryNavy,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 18,
-                ),
-              ),
-            ],
-          ),
-          content: Text(
+        icon: Icons.emergency_share,
+        iconColor: AppColors.emergencyRed,
+        title: 'Konfirmasi Siaran Darurat',
+        message:
             'Kirim sinyal darurat SOS dengan prioritas tertinggi ke ${connected.length} peer terhubung langsung?',
-            style: const TextStyle(fontSize: 14, color: AppColors.textPrimary),
+        actions: [
+          SiagaMeshDialogAction(
+            label: 'SIARKAN SEKARANG',
+            isDestructive: true,
+            onPressed: () {
+              Navigator.pop(context);
+              _dispatchEmergencySos(isQueued: false);
+            },
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Batal'),
-            ),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.emergencyRed,
-                foregroundColor: Colors.white,
-              ),
-              onPressed: () {
-                Navigator.pop(ctx);
-                _dispatchEmergencySos(isQueued: false);
-              },
-              child: const Text('SIARKAN SEKARANG'),
-            ),
-          ],
-        ),
+          SiagaMeshDialogAction(
+            label: 'Batal',
+            onPressed: () => Navigator.pop(context),
+          ),
+        ],
       );
     }
   }
@@ -499,13 +426,16 @@ class _HomeScreenState extends State<HomeScreen> {
                                 size: 20,
                               ),
                             const SizedBox(width: 8),
-                            const Text(
-                              'KIRIM PESAN DARURAT (SOS)',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 16,
-                                fontWeight: FontWeight.bold,
-                                letterSpacing: 0.5,
+                            const Flexible(
+                              child: Text(
+                                'KIRIM PESAN DARURAT (SOS)',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                  letterSpacing: 0.5,
+                                ),
+                                overflow: TextOverflow.ellipsis,
                               ),
                             ),
                           ],
@@ -519,6 +449,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             color: Colors.white.withValues(alpha: 0.75),
                             fontSize: 11,
                           ),
+                          textAlign: TextAlign.center,
                         ),
                       ],
                     ),
@@ -547,29 +478,33 @@ class _HomeScreenState extends State<HomeScreen> {
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text(
-                                  'KONEKTIVITAS MESH',
-                                  style: TextStyle(
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.w600,
-                                    color: AppColors.textMuted,
-                                    letterSpacing: 0.5,
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text(
+                                    'KONEKTIVITAS MESH',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w600,
+                                      color: AppColors.textMuted,
+                                      letterSpacing: 0.5,
+                                    ),
                                   ),
-                                ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  connectionCardTitle,
-                                  style: const TextStyle(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.bold,
-                                    color: AppColors.primaryNavy,
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    connectionCardTitle,
+                                    style: const TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                      color: AppColors.primaryNavy,
+                                    ),
+                                    overflow: TextOverflow.ellipsis,
                                   ),
-                                ),
-                              ],
+                                ],
+                              ),
                             ),
+                            const SizedBox(width: 8),
                             StatusBadge(
                               label: connectionCardPill,
                               backgroundColor: AppColors.accentPillBg,

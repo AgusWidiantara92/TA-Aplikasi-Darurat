@@ -39,14 +39,18 @@ class RadarWidget extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: const [
-              Text(
-                'Radar Sinyal Peer-to-Peer',
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.bold,
-                  color: AppColors.primaryNavy,
+              Expanded(
+                child: Text(
+                  'Radar Sinyal Peer-to-Peer',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                    color: AppColors.primaryNavy,
+                  ),
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
+              SizedBox(width: 8),
               Text(
                 'Wi-Fi Direct / BLE',
                 style: TextStyle(
@@ -98,10 +102,17 @@ class RadarWidget extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: const [
-              Text(
-                'Protokol: MANET P2P_CLUSTER',
-                style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
+              Expanded(
+                child: Text(
+                  'Protokol: MANET P2P_CLUSTER',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: AppColors.textSecondary,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
+              SizedBox(width: 8),
               Text(
                 'Nearby Connections',
                 style: TextStyle(

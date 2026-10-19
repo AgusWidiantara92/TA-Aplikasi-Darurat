@@ -3,11 +3,16 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:siagamesh_app/app.dart';
 import 'package:siagamesh_app/core/routing/routing_holder.dart';
+import 'package:siagamesh_app/core/transport/connectivity_prerequisite_service.dart';
 import 'package:siagamesh_app/core/transport/fake_mesh_transport.dart';
 import 'package:siagamesh_app/core/transport/mesh_transport.dart';
 import 'package:siagamesh_app/core/transport/transport_holder.dart';
 import 'package:siagamesh_app/features/chat/data/repositories/chat_repository.dart';
 import 'package:siagamesh_app/features/chat/models/chat_message.dart';
+import 'package:siagamesh_app/features/chat/presentation/chat_detail_screen.dart';
+import 'package:siagamesh_app/features/mesh_devices/presentation/mesh_devices_screen.dart';
+
+import 'package:siagamesh_app/core/widgets/siagamesh_dialog.dart';
 
 void main() {
   late FakeMeshTransport fakeTransport;
@@ -20,6 +25,7 @@ void main() {
     fakeTransport = FakeMeshTransport();
     MeshTransportHolder.setInstance(fakeTransport);
     ManetRoutingHolder.reset();
+    ConnectivityPrerequisiteHolder.reset();
   });
 
   testWidgets('SiagaMesh initial smoke test', (WidgetTester tester) async {
@@ -83,11 +89,11 @@ void main() {
     await tester.pumpAndSettle();
 
     // Verifikasi dialog peringatan muncul
-    expect(find.text('Peringatan Darurat (SOS)'), findsOneWidget);
-    expect(find.text('Simpan ke Antrean Siaran'), findsOneWidget);
+    expect(find.text('Belum Ada Perangkat Terhubung'), findsOneWidget);
+    expect(find.text('Simpan ke Antrean'), findsOneWidget);
 
-    // Tekan Simpan ke Antrean Siaran
-    await tester.tap(find.text('Simpan ke Antrean Siaran'));
+    // Tekan Simpan ke Antrean
+    await tester.tap(find.text('Simpan ke Antrean'));
     await tester.pumpAndSettle();
 
     // Verifikasi SnackBar muncul
@@ -357,4 +363,279 @@ void main() {
       PeerConnectionStatus.connecting,
     );
   });
+
+  testWidgets('Verifikasi dialog prasyarat Bluetooth mati di Layar Perangkat', (
+    WidgetTester tester,
+  ) async {
+    final fakePrereq = FakeConnectivityPrerequisiteService(
+      currentResult: const PrerequisiteCheckResult(
+        status: PrerequisiteStatus.bluetoothDisabled,
+        permissionsGranted: true,
+        bluetoothEnabled: false,
+      ),
+    );
+    ConnectivityPrerequisiteHolder.setInstance(fakePrereq);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MeshDevicesScreen(
+          transport: fakeTransport,
+          prerequisiteService: fakePrereq,
+        ),
+      ),
+    );
+
+    // Scroll agar tombol Mulai Pindai terlihat
+    await tester.drag(find.byType(ListView), const Offset(0, -200));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Mulai Pindai'));
+    await tester.pumpAndSettle();
+
+    // Dialog 'Koneksi Belum Siap' harus muncul
+    expect(find.text('Koneksi Belum Siap'), findsOneWidget);
+    expect(
+      find.textContaining('Bluetooth diperlukan untuk mendeteksi perangkat'),
+      findsOneWidget,
+    );
+    expect(find.text('Buka Pengaturan'), findsOneWidget);
+    expect(find.text('Coba Lagi'), findsOneWidget);
+    expect(find.text('Nanti'), findsOneWidget);
+
+    // Tekan Buka Pengaturan
+    await tester.tap(find.text('Buka Pengaturan'));
+    await tester.pumpAndSettle();
+
+    expect(fakePrereq.openBluetoothSettingsCalled, isTrue);
+  });
+
+  testWidgets(
+    'Verifikasi dialog prasyarat izin ditolak permanen di Layar Perangkat',
+    (WidgetTester tester) async {
+      final fakePrereq = FakeConnectivityPrerequisiteService(
+        currentResult: const PrerequisiteCheckResult(
+          status: PrerequisiteStatus.permissionPermanentlyDenied,
+          permissionsGranted: false,
+          permanentlyDenied: true,
+        ),
+      );
+      ConnectivityPrerequisiteHolder.setInstance(fakePrereq);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: MeshDevicesScreen(
+            transport: fakeTransport,
+            prerequisiteService: fakePrereq,
+          ),
+        ),
+      );
+
+      // Scroll agar tombol Mulai Pindai terlihat
+      await tester.drag(find.byType(ListView), const Offset(0, -200));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Mulai Pindai'));
+      await tester.pumpAndSettle();
+
+      // Dialog 'Izin Diperlukan' dengan aksi Buka Pengaturan dan Batal
+      expect(find.text('Izin Diperlukan'), findsOneWidget);
+      expect(
+        find.textContaining('SiagaMesh memerlukan izin Nearby/Bluetooth'),
+        findsOneWidget,
+      );
+      expect(find.text('Buka Pengaturan'), findsOneWidget);
+      expect(find.text('Batal'), findsOneWidget);
+
+      await tester.tap(find.text('Buka Pengaturan'));
+      await tester.pumpAndSettle();
+
+      expect(fakePrereq.openAppSettingsCalled, isTrue);
+    },
+  );
+
+  testWidgets(
+    'Verifikasi status empty state saat pemindaian aktif tanpa peer ditemukan',
+    (WidgetTester tester) async {
+      final fakePrereq = FakeConnectivityPrerequisiteService(
+        currentResult: const PrerequisiteCheckResult(
+          status: PrerequisiteStatus.ready,
+          permissionsGranted: true,
+          bluetoothEnabled: true,
+        ),
+      );
+      ConnectivityPrerequisiteHolder.setInstance(fakePrereq);
+
+      // Aktifkan discovery pada transport
+      await fakeTransport.startDiscovery();
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: MeshDevicesScreen(
+            transport: fakeTransport,
+            prerequisiteService: fakePrereq,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Status header banner
+      expect(find.text('MEMINDAI • 0 PEER TERDETEKSI'), findsOneWidget);
+
+      // Scroll ke area empty state
+      await tester.drag(find.byType(ListView), const Offset(0, -300));
+      await tester.pumpAndSettle();
+
+      // Empty state harus menampilkan 'Belum Ada Perangkat Ditemukan'
+      expect(find.text('Belum Ada Perangkat Ditemukan'), findsOneWidget);
+      expect(
+        find.textContaining('Perangkat sekitar belum terdeteksi.'),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets('Verifikasi penghapusan pesan broadcast dengan konfirmasi dialog', (
+    WidgetTester tester,
+  ) async {
+    final repo = ChatRepositoryHolder.instance;
+    final broadcastConv = await repo.getOrCreateBroadcastConversation();
+
+    const testMsg = ChatMessage(
+      id: 'msg-broadcast-to-delete',
+      senderName: 'Anda',
+      text: 'Pesan darurat broadcast uji penghapusan',
+      time: '16:00',
+      isMe: true,
+    );
+    await repo.saveMessage(broadcastConv.id, testMsg);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChatDetailScreen(
+          conversationId: broadcastConv.id,
+          conversationTitle: 'Siaran Darurat Lokal',
+          nodeId: 'Broadcast ID: #ALL-NODES',
+          repository: repo,
+          transport: fakeTransport,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('Pesan darurat broadcast uji penghapusan'),
+      findsOneWidget,
+    );
+
+    // Temukan tombol Hapus pada pesan
+    final deleteBtnFinder = find.byKey(
+      const Key('delete_msg_msg-broadcast-to-delete'),
+    );
+    expect(deleteBtnFinder, findsOneWidget);
+
+    // Tap tombol Hapus -> Dialog konfirmasi muncul
+    await tester.tap(deleteBtnFinder);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Hapus Pesan Broadcast?'), findsOneWidget);
+    expect(
+      find.text(
+        'Pesan ini akan dihapus dari riwayat lokal. Pesan yang sudah diterima perangkat lain tidak ikut terhapus.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Batal'), findsOneWidget);
+    expect(find.widgetWithText(ElevatedButton, 'Hapus'), findsOneWidget);
+
+    // Tap Batal terlebih dahulu -> pesan masih ada
+    await tester.tap(find.text('Batal'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Pesan darurat broadcast uji penghapusan'),
+      findsOneWidget,
+    );
+
+    // Tap Hapus lagi -> lalu konfirmasi Hapus
+    await tester.tap(deleteBtnFinder);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Hapus'));
+    await tester.pumpAndSettle();
+
+    // Pesan hilang dari UI
+    expect(find.text('Pesan darurat broadcast uji penghapusan'), findsNothing);
+    expect(
+      find.text('Pesan broadcast berhasil dihapus dari riwayat lokal.'),
+      findsOneWidget,
+    );
+
+    // Verifikasi pesan terhapus dari repository
+    final messagesInRepo = await repo.getMessages(broadcastConv.id);
+    expect(
+      messagesInRepo.any((m) => m.id == 'msg-broadcast-to-delete'),
+      isFalse,
+    );
+  });
+
+  testWidgets(
+    'Verifikasi dialog anti-overflow pada resolusi layar sempit (280x480)',
+    (WidgetTester tester) async {
+      // Set resolusi sempit ekstrem (280x480)
+      tester.view.physicalSize = const Size(280, 480);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: Center(
+                child: ElevatedButton(
+                  onPressed: () {
+                    SiagaMeshDialog.show(
+                      context: context,
+                      title: 'Belum Ada Perangkat Terhubung',
+                      message:
+                          'Tidak ada node yang terhubung langsung saat ini. Pesan darurat (SOS) dapat disimpan ke antrean transmisi lokal untuk dikirim otomatis begitu peer terdeteksi.',
+                      actions: [
+                        SiagaMeshDialogAction(
+                          label: 'Simpan ke Antrean',
+                          isPrimary: true,
+                          onPressed: () => Navigator.pop(context),
+                        ),
+                        SiagaMeshDialogAction(
+                          label: 'Buka Perangkat',
+                          isOutlined: true,
+                          onPressed: () => Navigator.pop(context),
+                        ),
+                        SiagaMeshDialogAction(
+                          label: 'Batal',
+                          onPressed: () => Navigator.pop(context),
+                        ),
+                      ],
+                    );
+                  },
+                  child: const Text('Buka Dialog'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Buka Dialog'));
+      await tester.pumpAndSettle();
+
+      // Verifikasi dialog muncul tanpa melempar RenderFlex overflow exception
+      expect(find.text('Belum Ada Perangkat Terhubung'), findsOneWidget);
+      expect(find.text('Simpan ke Antrean'), findsOneWidget);
+      expect(find.text('Buka Perangkat'), findsOneWidget);
+      expect(find.text('Batal'), findsOneWidget);
+
+      // Verifikasi tombol dapat ditekan dengan aman
+      await tester.tap(find.text('Batal'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Belum Ada Perangkat Terhubung'), findsNothing);
+    },
+  );
 }

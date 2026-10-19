@@ -2,9 +2,11 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import '../../../core/constants/app_colors.dart';
+import '../../../core/transport/connectivity_prerequisite_service.dart';
 import '../../../core/transport/mesh_transport.dart';
 import '../../../core/transport/transport_holder.dart';
 import '../../../core/widgets/app_header.dart';
+import '../../../core/widgets/siagamesh_dialog.dart';
 import '../../../core/widgets/status_badge.dart';
 import '../../chat/data/repositories/chat_repository.dart';
 import '../../chat/presentation/chat_detail_screen.dart';
@@ -14,21 +16,30 @@ import 'widgets/radar_widget.dart';
 class MeshDevicesScreen extends StatefulWidget {
   final ChatRepository? repository;
   final MeshTransport? transport;
+  final ConnectivityPrerequisiteService? prerequisiteService;
 
-  const MeshDevicesScreen({super.key, this.repository, this.transport});
+  const MeshDevicesScreen({
+    super.key,
+    this.repository,
+    this.transport,
+    this.prerequisiteService,
+  });
 
   @override
   State<MeshDevicesScreen> createState() => _MeshDevicesScreenState();
 }
 
-class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
+class _MeshDevicesScreenState extends State<MeshDevicesScreen>
+    with WidgetsBindingObserver {
   late ChatRepository _repository;
   late MeshTransport _transport;
+  late ConnectivityPrerequisiteService _prerequisiteService;
   StreamSubscription<List<DiscoveredPeer>>? _peersSub;
   StreamSubscription<TransportConnectionEvent>? _eventsSub;
   List<DiscoveredPeer> _physicalPeers = [];
   bool _isAdvertising = false;
   bool _isDiscovering = false;
+  bool _isDialogShowing = false;
   TransportConnectionEvent? _lastEvent;
 
   @override
@@ -36,6 +47,10 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
     super.initState();
     _repository = widget.repository ?? ChatRepositoryHolder.instance;
     _transport = widget.transport ?? MeshTransportHolder.instance;
+    _prerequisiteService =
+        widget.prerequisiteService ?? ConnectivityPrerequisiteHolder.instance;
+    WidgetsBinding.instance.addObserver(this);
+
     _isAdvertising = _transport.isAdvertising;
     _isDiscovering = _transport.isDiscovering;
     _physicalPeers = _transport.currentPeers;
@@ -69,10 +84,217 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && mounted) {
+      setState(() {
+        _isAdvertising = _transport.isAdvertising;
+        _isDiscovering = _transport.isDiscovering;
+        _physicalPeers = _transport.currentPeers;
+      });
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _peersSub?.cancel();
     _eventsSub?.cancel();
     super.dispose();
+  }
+
+  Future<void> _showPrerequisiteDialog({
+    required String title,
+    required String message,
+    required List<SiagaMeshDialogAction> actions,
+    IconData icon = Icons.info_outline_rounded,
+    Color? iconColor,
+  }) async {
+    if (_isDialogShowing || !mounted) return;
+    _isDialogShowing = true;
+    try {
+      await SiagaMeshDialog.show(
+        context: context,
+        icon: icon,
+        iconColor: iconColor ?? AppColors.primaryNavy,
+        title: title,
+        message: message,
+        actions: actions,
+      );
+    } finally {
+      _isDialogShowing = false;
+    }
+  }
+
+  Future<bool> _ensurePrerequisitesMet({required VoidCallback onRetry}) async {
+    final check = await _prerequisiteService.checkPrerequisites();
+
+    if (check.isReady) {
+      return true;
+    }
+
+    if (check.status == PrerequisiteStatus.permissionPermanentlyDenied) {
+      await _showPrerequisiteDialog(
+        title: 'Izin Diperlukan',
+        message:
+            'SiagaMesh memerlukan izin Nearby/Bluetooth untuk mencari perangkat tanpa internet. Buka Pengaturan aplikasi untuk mengaktifkannya.',
+        icon: Icons.security_rounded,
+        iconColor: AppColors.emergencyRed,
+        actions: [
+          SiagaMeshDialogAction(
+            label: 'Buka Pengaturan',
+            isPrimary: true,
+            onPressed: () {
+              Navigator.pop(context);
+              _prerequisiteService.openAppSettings();
+            },
+          ),
+          SiagaMeshDialogAction(
+            label: 'Batal',
+            onPressed: () => Navigator.pop(context),
+          ),
+        ],
+      );
+      return false;
+    }
+
+    if (check.status == PrerequisiteStatus.permissionRequired) {
+      // Coba minta via runtime dialog terlebih dahulu
+      final granted = await _prerequisiteService.requestPermissions();
+      if (granted) {
+        final recheck = await _prerequisiteService.checkPrerequisites();
+        if (recheck.isReady) {
+          return true;
+        } else if (recheck.status == PrerequisiteStatus.bluetoothDisabled) {
+          return _handleBluetoothDisabled(onRetry);
+        }
+      }
+
+      // Jika ditolak setelah diminta
+      final recheck = await _prerequisiteService.checkPrerequisites();
+      if (recheck.permanentlyDenied) {
+        await _showPrerequisiteDialog(
+          title: 'Izin Diperlukan',
+          message:
+              'SiagaMesh memerlukan izin Nearby/Bluetooth untuk mencari perangkat tanpa internet. Buka Pengaturan aplikasi untuk mengaktifkannya.',
+          icon: Icons.security_rounded,
+          iconColor: AppColors.emergencyRed,
+          actions: [
+            SiagaMeshDialogAction(
+              label: 'Buka Pengaturan',
+              isPrimary: true,
+              onPressed: () {
+                Navigator.pop(context);
+                _prerequisiteService.openAppSettings();
+              },
+            ),
+            SiagaMeshDialogAction(
+              label: 'Batal',
+              onPressed: () => Navigator.pop(context),
+            ),
+          ],
+        );
+      } else {
+        await _showPrerequisiteDialog(
+          title: 'Izin Diperlukan',
+          message:
+              'SiagaMesh memerlukan izin perangkat sekitar (Bluetooth & Wi-Fi) untuk mencari perangkat tanpa internet.',
+          icon: Icons.security_rounded,
+          iconColor: AppColors.primaryNavy,
+          actions: [
+            SiagaMeshDialogAction(
+              label: 'Buka Pengaturan',
+              isPrimary: true,
+              onPressed: () {
+                Navigator.pop(context);
+                _prerequisiteService.openAppSettings();
+              },
+            ),
+            SiagaMeshDialogAction(
+              label: 'Coba Lagi',
+              isOutlined: true,
+              onPressed: () {
+                Navigator.pop(context);
+                onRetry();
+              },
+            ),
+            SiagaMeshDialogAction(
+              label: 'Nanti',
+              onPressed: () => Navigator.pop(context),
+            ),
+          ],
+        );
+      }
+      return false;
+    }
+
+    if (check.status == PrerequisiteStatus.bluetoothDisabled) {
+      return _handleBluetoothDisabled(onRetry);
+    }
+
+    // Default error/fallback (Koneksi Belum Siap)
+    await _showPrerequisiteDialog(
+      title: 'Koneksi Belum Siap',
+      message:
+          'SiagaMesh memerlukan akses konektivitas untuk mencari perangkat di sekitar. Periksa izin aplikasi serta pengaturan Bluetooth dan Wi-Fi, kemudian coba kembali.',
+      icon: Icons.bluetooth_disabled_rounded,
+      iconColor: AppColors.warningOrange,
+      actions: [
+        SiagaMeshDialogAction(
+          label: 'Buka Pengaturan',
+          isPrimary: true,
+          onPressed: () {
+            Navigator.pop(context);
+            _prerequisiteService.openAppSettings();
+          },
+        ),
+        SiagaMeshDialogAction(
+          label: 'Coba Lagi',
+          isOutlined: true,
+          onPressed: () {
+            Navigator.pop(context);
+            onRetry();
+          },
+        ),
+        SiagaMeshDialogAction(
+          label: 'Nanti',
+          onPressed: () => Navigator.pop(context),
+        ),
+      ],
+    );
+    return false;
+  }
+
+  Future<bool> _handleBluetoothDisabled(VoidCallback onRetry) async {
+    await _showPrerequisiteDialog(
+      title: 'Koneksi Belum Siap',
+      message:
+          'Bluetooth diperlukan untuk mendeteksi perangkat sekitar dalam jaringan mesh. Aktifkan Bluetooth untuk melanjutkan.',
+      icon: Icons.bluetooth_disabled_rounded,
+      iconColor: AppColors.warningOrange,
+      actions: [
+        SiagaMeshDialogAction(
+          label: 'Buka Pengaturan',
+          isPrimary: true,
+          onPressed: () {
+            Navigator.pop(context);
+            _prerequisiteService.openBluetoothSettings();
+          },
+        ),
+        SiagaMeshDialogAction(
+          label: 'Coba Lagi',
+          isOutlined: true,
+          onPressed: () {
+            Navigator.pop(context);
+            onRetry();
+          },
+        ),
+        SiagaMeshDialogAction(
+          label: 'Nanti',
+          onPressed: () => Navigator.pop(context),
+        ),
+      ],
+    );
+    return false;
   }
 
   void _toggleAdvertising() async {
@@ -89,6 +311,9 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
         ),
       );
     } else {
+      final ready = await _ensurePrerequisitesMet(onRetry: _toggleAdvertising);
+      if (!ready || !mounted) return;
+
       final success = await _transport.startAdvertising(
         localNodeName:
             'SiagaMesh-${DateTime.now().millisecondsSinceEpoch % 1000}',
@@ -97,16 +322,38 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
       setState(() {
         _isAdvertising = success;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            success
-                ? 'Siaran (Advertising) 1-hop AKTIF.'
-                : 'Gagal mengaktifkan siaran (Periksa izin Bluetooth/Lokasi).',
+
+      if (!success) {
+        debugPrint('[MeshDevices] Inisialisasi startAdvertising gagal.');
+        await _showPrerequisiteDialog(
+          title: 'Inisialisasi Mesh Gagal',
+          message:
+              'Gagal menginisialisasi siaran node mesh terdekat. Pastikan radio nirkabel Anda aktif dan coba lagi.',
+          icon: Icons.error_outline_rounded,
+          iconColor: AppColors.emergencyRed,
+          actions: [
+            SiagaMeshDialogAction(
+              label: 'Coba Lagi',
+              isPrimary: true,
+              onPressed: () {
+                Navigator.pop(context);
+                _toggleAdvertising();
+              },
+            ),
+            SiagaMeshDialogAction(
+              label: 'Nanti',
+              onPressed: () => Navigator.pop(context),
+            ),
+          ],
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Siaran (Advertising) 1-hop AKTIF.'),
+            duration: Duration(seconds: 2),
           ),
-          duration: const Duration(seconds: 2),
-        ),
-      );
+        );
+      }
     }
   }
 
@@ -124,21 +371,46 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
         ),
       );
     } else {
+      final ready = await _ensurePrerequisitesMet(onRetry: _toggleDiscovery);
+      if (!ready || !mounted) return;
+
       final success = await _transport.startDiscovery();
       if (!mounted) return;
       setState(() {
         _isDiscovering = success;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            success
-                ? 'Pemindaian (Discovery) 1-hop AKTIF.'
-                : 'Gagal memulai pemindaian (Periksa izin Bluetooth/Lokasi).',
+
+      if (!success) {
+        debugPrint('[MeshDevices] Inisialisasi startDiscovery gagal.');
+        await _showPrerequisiteDialog(
+          title: 'Inisialisasi Mesh Gagal',
+          message:
+              'Gagal menginisialisasi layanan mesh terdekat. Pastikan radio nirkabel Anda aktif dan tidak sedang digunakan aplikasi lain, lalu coba lagi.',
+          icon: Icons.error_outline_rounded,
+          iconColor: AppColors.emergencyRed,
+          actions: [
+            SiagaMeshDialogAction(
+              label: 'Coba Lagi',
+              isPrimary: true,
+              onPressed: () {
+                Navigator.pop(context);
+                _toggleDiscovery();
+              },
+            ),
+            SiagaMeshDialogAction(
+              label: 'Nanti',
+              onPressed: () => Navigator.pop(context),
+            ),
+          ],
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Pemindaian (Discovery) 1-hop AKTIF.'),
+            duration: Duration(seconds: 2),
           ),
-          duration: const Duration(seconds: 2),
-        ),
-      );
+        );
+      }
     }
   }
 
@@ -395,19 +667,23 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen> {
                             ),
                           ),
                           const SizedBox(height: 12),
-                          const Text(
-                            'Belum Ada Peer Terdeteksi',
-                            style: TextStyle(
+                          Text(
+                            _isDiscovering
+                                ? 'Belum Ada Perangkat Ditemukan'
+                                : 'Belum Ada Peer Terdeteksi',
+                            style: const TextStyle(
                               fontSize: 14,
                               fontWeight: FontWeight.bold,
                               color: AppColors.primaryNavy,
                             ),
                           ),
                           const SizedBox(height: 6),
-                          const Text(
-                            'Aktifkan Siaran di satu perangkat dan Pindai di perangkat lainnya untuk membentuk koneksi mesh 1-hop nirkabel (tanpa internet).',
+                          Text(
+                            _isDiscovering
+                                ? 'Perangkat sekitar belum terdeteksi. Pastikan perangkat lain juga menjalankan SiagaMesh dan berada dalam jangkauan.'
+                                : 'Aktifkan Siaran di satu perangkat dan Pindai di perangkat lainnya untuk membentuk koneksi mesh 1-hop nirkabel (tanpa internet).',
                             textAlign: TextAlign.center,
-                            style: TextStyle(
+                            style: const TextStyle(
                               fontSize: 12,
                               color: AppColors.textSecondary,
                               height: 1.4,

@@ -7,6 +7,7 @@ import '../../../core/routing/routing_holder.dart';
 import '../../../core/transport/mesh_transport.dart';
 import '../../../core/transport/transport_holder.dart';
 import '../../../core/transport/transport_payload_envelope.dart';
+import '../../../core/widgets/siagamesh_dialog.dart';
 import '../../../core/widgets/status_badge.dart';
 import '../data/repositories/chat_repository.dart';
 import '../models/chat_message.dart';
@@ -233,6 +234,59 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       return 'broadcast-all';
     }
     return null;
+  }
+
+  bool get _isBroadcastScreen =>
+      widget.conversationId == 'broadcast-all' ||
+      widget.nodeId.contains('ALL-NODES') ||
+      widget.conversationTitle.contains('Siaran');
+
+  void _confirmDeleteBroadcastMessage(ChatMessage msg) {
+    SiagaMeshDialog.show(
+      context: context,
+      icon: Icons.delete_outline_rounded,
+      iconColor: AppColors.emergencyRed,
+      title: 'Hapus Pesan Broadcast?',
+      message:
+          'Pesan ini akan dihapus dari riwayat lokal. Pesan yang sudah diterima perangkat lain tidak ikut terhapus.',
+      actions: [
+        SiagaMeshDialogAction(
+          label: 'Hapus',
+          isDestructive: true,
+          onPressed: () async {
+            Navigator.pop(context);
+            await _deleteBroadcastMessage(msg);
+          },
+        ),
+        SiagaMeshDialogAction(
+          label: 'Batal',
+          onPressed: () => Navigator.pop(context),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _deleteBroadcastMessage(ChatMessage msg) async {
+    final targetConvId = _resolveConversationId() ?? 'broadcast-all';
+
+    // 1. Batalkan dari antrean store-and-forward routing engine jika ada
+    _routingEngine.cancelQueuedMessage(msg.id);
+
+    // 2. Hapus dari ChatRepository lokal dan SharedPreferences
+    await _repository.deleteMessage(targetConvId, msg.id);
+
+    // 3. Perbarui state UI lokal
+    if (!mounted) return;
+    setState(() {
+      _messages.removeWhere((m) => m.id == msg.id);
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Pesan broadcast berhasil dihapus dari riwayat lokal.'),
+        duration: Duration(seconds: 2),
+      ),
+    );
   }
 
   void _sendMessage({String? customText, TelemetryData? telemetry}) async {
@@ -711,47 +765,90 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             ? CrossAxisAlignment.end
             : CrossAxisAlignment.start,
         children: [
-          // Header Pengirim & Waktu
+          // Header Pengirim & Waktu & Tombol Hapus jika broadcast
           Padding(
             padding: const EdgeInsets.only(left: 4, right: 4, bottom: 4),
-            child: Text(
-              '${msg.senderName} • ${msg.time}',
-              style: const TextStyle(
-                fontSize: 10,
-                fontWeight: FontWeight.w500,
-                color: AppColors.textMuted,
-              ),
-            ),
-          ),
-          // Gelembung Pesan
-          Container(
-            constraints: BoxConstraints(
-              maxWidth: MediaQuery.of(context).size.width * 0.78,
-            ),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              color: isMe ? AppColors.primaryNavy : AppColors.surface,
-              borderRadius: BorderRadius.only(
-                topLeft: const Radius.circular(16),
-                topRight: const Radius.circular(16),
-                bottomLeft: Radius.circular(isMe ? 16 : 4),
-                bottomRight: Radius.circular(isMe ? 4 : 16),
-              ),
-              border: isMe ? null : Border.all(color: AppColors.borderLight),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.04),
-                  blurRadius: 4,
-                  offset: const Offset(0, 2),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '${msg.senderName} • ${msg.time}',
+                  style: const TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w500,
+                    color: AppColors.textMuted,
+                  ),
                 ),
+                if (_isBroadcastScreen) ...[
+                  const SizedBox(width: 8),
+                  InkWell(
+                    key: Key('delete_msg_${msg.id}'),
+                    onTap: () => _confirmDeleteBroadcastMessage(msg),
+                    borderRadius: BorderRadius.circular(8),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 4,
+                        vertical: 1,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: const [
+                          Icon(
+                            Icons.delete_outline,
+                            size: 13,
+                            color: AppColors.emergencyRed,
+                          ),
+                          SizedBox(width: 2),
+                          Text(
+                            'Hapus',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: AppColors.emergencyRed,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
               ],
             ),
-            child: Text(
-              msg.text,
-              style: TextStyle(
-                fontSize: 13,
-                color: isMe ? Colors.white : AppColors.textPrimary,
-                height: 1.35,
+          ),
+          // Gelembung Pesan (dengan long-press jika di layar broadcast)
+          GestureDetector(
+            onLongPress: _isBroadcastScreen
+                ? () => _confirmDeleteBroadcastMessage(msg)
+                : null,
+            child: Container(
+              constraints: BoxConstraints(
+                maxWidth: MediaQuery.of(context).size.width * 0.78,
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: isMe ? AppColors.primaryNavy : AppColors.surface,
+                borderRadius: BorderRadius.only(
+                  topLeft: const Radius.circular(16),
+                  topRight: const Radius.circular(16),
+                  bottomLeft: Radius.circular(isMe ? 16 : 4),
+                  bottomRight: Radius.circular(isMe ? 4 : 16),
+                ),
+                border: isMe ? null : Border.all(color: AppColors.borderLight),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.04),
+                    blurRadius: 4,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Text(
+                msg.text,
+                style: TextStyle(
+                  fontSize: 13,
+                  color: isMe ? Colors.white : AppColors.textPrimary,
+                  height: 1.35,
+                ),
               ),
             ),
           ),
@@ -784,120 +881,163 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
         children: [
           Padding(
             padding: const EdgeInsets.only(right: 4, bottom: 4),
-            child: Text(
-              '${msg.senderName} • ${msg.time}',
-              style: const TextStyle(
-                fontSize: 10,
-                fontWeight: FontWeight.w500,
-                color: AppColors.textMuted,
-              ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '${msg.senderName} • ${msg.time}',
+                  style: const TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w500,
+                    color: AppColors.textMuted,
+                  ),
+                ),
+                if (_isBroadcastScreen) ...[
+                  const SizedBox(width: 8),
+                  InkWell(
+                    key: Key('delete_telemetry_${msg.id}'),
+                    onTap: () => _confirmDeleteBroadcastMessage(msg),
+                    borderRadius: BorderRadius.circular(8),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 4,
+                        vertical: 1,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: const [
+                          Icon(
+                            Icons.delete_outline,
+                            size: 13,
+                            color: AppColors.emergencyRed,
+                          ),
+                          SizedBox(width: 2),
+                          Text(
+                            'Hapus',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: AppColors.emergencyRed,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ],
             ),
           ),
-          Container(
-            width: MediaQuery.of(context).size.width * 0.85,
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: AppColors.surface,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(
-                color: AppColors.emergencyRed.withValues(alpha: 0.4),
+          GestureDetector(
+            onLongPress: _isBroadcastScreen
+                ? () => _confirmDeleteBroadcastMessage(msg)
+                : null,
+            child: Container(
+              width: MediaQuery.of(context).size.width * 0.85,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: AppColors.surface,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: AppColors.emergencyRed.withValues(alpha: 0.4),
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: AppColors.emergencyRed.withValues(alpha: 0.05),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
               ),
-              boxShadow: [
-                BoxShadow(
-                  color: AppColors.emergencyRed.withValues(alpha: 0.05),
-                  blurRadius: 8,
-                  offset: const Offset(0, 2),
-                ),
-              ],
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    const Text(
-                      'Data Telemetri Lokasi',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                        color: AppColors.primaryNavy,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        'Data Telemetri Lokasi',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: AppColors.primaryNavy,
+                        ),
                       ),
-                    ),
-                    StatusBadge(
-                      label: tele.priority,
-                      backgroundColor: AppColors.emergencyRedLight,
-                      textColor: AppColors.emergencyRed,
+                      StatusBadge(
+                        label: tele.priority,
+                        backgroundColor: AppColors.emergencyRedLight,
+                        textColor: AppColors.emergencyRed,
+                        fontSize: 9,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 2,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'DATA TELEMETRI DARURAT',
+                    style: TextStyle(
                       fontSize: 9,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 6,
-                        vertical: 2,
-                      ),
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.accentBlue,
+                      letterSpacing: 0.3,
                     ),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                const Text(
-                  'DATA TELEMETRI DARURAT',
-                  style: TextStyle(
-                    fontSize: 9,
-                    fontWeight: FontWeight.w600,
-                    color: AppColors.accentBlue,
-                    letterSpacing: 0.3,
                   ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Koordinat Darurat: ${tele.locationName}',
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                    color: AppColors.textPrimary,
+                  const SizedBox(height: 8),
+                  Text(
+                    'Koordinat Darurat: ${tele.locationName}',
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold,
+                      color: AppColors.textPrimary,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 4),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      '${tele.latitude}, ${tele.longitude}',
-                      style: const TextStyle(
-                        fontSize: 11,
-                        color: AppColors.textSecondary,
-                        fontFamily: 'monospace',
+                  const SizedBox(height: 4),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        '${tele.latitude}, ${tele.longitude}',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: AppColors.textSecondary,
+                          fontFamily: 'monospace',
+                        ),
                       ),
-                    ),
-                    Text(
-                      tele.accuracy,
-                      style: const TextStyle(
-                        fontSize: 10,
-                        color: AppColors.textMuted,
+                      Text(
+                        tele.accuracy,
+                        style: const TextStyle(
+                          fontSize: 10,
+                          color: AppColors.textMuted,
+                        ),
                       ),
-                    ),
-                  ],
-                ),
-                const Divider(height: 14),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    const Text(
-                      'Pengirim: Node Anda',
-                      style: TextStyle(
-                        fontSize: 10,
-                        color: AppColors.textMuted,
+                    ],
+                  ),
+                  const Divider(height: 14),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        'Pengirim: Node Anda',
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: AppColors.textMuted,
+                        ),
                       ),
-                    ),
-                    Text(
-                      tele.validationInfo,
-                      style: const TextStyle(
-                        fontSize: 10,
-                        color: AppColors.accentBlue,
-                        fontWeight: FontWeight.w500,
+                      Text(
+                        tele.validationInfo,
+                        style: const TextStyle(
+                          fontSize: 10,
+                          color: AppColors.accentBlue,
+                          fontWeight: FontWeight.w500,
+                        ),
                       ),
-                    ),
-                  ],
-                ),
-              ],
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
         ],
