@@ -15,6 +15,8 @@
 /// 12. Blok hasil aktual BlockdagSecurityCoordinator.flushPendingEvents() lolos pemeriksaan privasi yang direkonsiliasi.
 library;
 
+import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -118,6 +120,35 @@ class FakeChatRepository implements ChatRepository {
   @override
   Future<void> clearAllData() async {
     savedMessages.clear();
+  }
+}
+
+class ControllableFakeMeshTransport extends FakeMeshTransport {
+  final bool sendResult;
+  final bool shouldThrow;
+  final int sendDelayMs;
+
+  ControllableFakeMeshTransport({
+    this.sendResult = true,
+    this.shouldThrow = false,
+    this.sendDelayMs = 0,
+  });
+
+  @override
+  Future<bool> sendBytes({
+    required String endpointId,
+    required Uint8List bytes,
+  }) async {
+    if (sendDelayMs > 0) {
+      await Future<void>.delayed(Duration(milliseconds: sendDelayMs));
+    }
+    if (shouldThrow) {
+      throw Exception('Simulated transport channel failure');
+    }
+    if (!sendResult) {
+      return false;
+    }
+    return super.sendBytes(endpointId: endpointId, bytes: bytes);
   }
 }
 
@@ -294,6 +325,22 @@ void main() {
         final remoteTipUnknown1 = computeSha256('unknown-block-1');
         final remoteTipUnknown2 = computeSha256('unknown-block-2');
 
+        // Kirim DAG_HELLO pengenalan status terlebih dahulu
+        final remoteHello = DagHelloMessage(
+          senderNodeId: 'NODE-B',
+          senderTimestamp: DateTime.now().toUtc().millisecondsSinceEpoch,
+          schemaVersion: 1,
+          activeBlocksCount: 1,
+          maxIndex: 0,
+          tipHashes: [ledger.genesisBlock.blockHash],
+          genesisHash: ledger.genesisBlock.blockHash,
+        );
+        fakeTransport.simulateIncomingPayload(
+          endpointId: 'ep-b',
+          bytes: DagGossipCodec.encode(remoteHello),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
         final remoteInv = DagInvMessage(
           senderNodeId: 'NODE-B',
           senderTimestamp: DateTime.now().toUtc().millisecondsSinceEpoch,
@@ -331,6 +378,22 @@ void main() {
       () async {
         gossipEngine.isEnabled = true;
         final hashX = computeSha256('block-x');
+
+        // Kirim DAG_HELLO pengenalan status terlebih dahulu
+        final remoteHello = DagHelloMessage(
+          senderNodeId: 'NODE-B',
+          senderTimestamp: DateTime.now().toUtc().millisecondsSinceEpoch,
+          schemaVersion: 1,
+          activeBlocksCount: 1,
+          maxIndex: 0,
+          tipHashes: [ledger.genesisBlock.blockHash],
+          genesisHash: ledger.genesisBlock.blockHash,
+        );
+        fakeTransport.simulateIncomingPayload(
+          endpointId: 'ep-dup',
+          bytes: DagGossipCodec.encode(remoteHello),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
 
         final invMsg = DagInvMessage(
           senderNodeId: 'NODE-B',
@@ -701,4 +764,532 @@ void main() {
       },
     );
   });
+
+  group(
+    'STAGE 5E.4.3.1 — Harden Gossip Payload Demultiplexing & Async Error Handling',
+    () {
+      late FakeMeshTransport fakeTransport;
+      late LightweightBlockdagLedger ledger;
+      late DagGossipSyncEngine gossipEngine;
+      late MeshExperimentLogger logger;
+      late FakeChatRepository fakeChatRepo;
+      late ManetRoutingEngine routingEngine;
+
+      setUp(() {
+        ManetRoutingHolder.reset();
+        fakeTransport = FakeMeshTransport();
+        ledger = LightweightBlockdagLedger();
+        logger = MeshExperimentLogger();
+        fakeChatRepo = FakeChatRepository();
+
+        gossipEngine = DagGossipSyncEngine(
+          transport: fakeTransport,
+          localNodeId: 'NODE-A',
+          ledger: ledger,
+          isEnabled: false,
+        );
+
+        routingEngine = ManetRoutingEngine(
+          transport: fakeTransport,
+          identityManager: NodeIdentityManager(),
+          repository: fakeChatRepo,
+          experimentLogger: logger,
+          gossipSyncEngine: gossipEngine,
+        );
+      });
+
+      tearDown(() {
+        routingEngine.dispose();
+        gossipEngine.dispose();
+        ManetRoutingHolder.reset();
+      });
+
+      // 1. Pesan chat berisi marker literal "SIAGAMESH_DAG_SYNC"
+      test(
+        '1. Chat message containing literal text "SIAGAMESH_DAG_SYNC" routes normally to chat',
+        () async {
+          gossipEngine.isEnabled = true;
+          fakeTransport.clearSentPayloads();
+
+          final chatEnvelope = MessageEnvelope(
+            envelopeId: 'chat-marker-101',
+            type: MessageEnvelope.typeChat,
+            senderId: 'NODE-SENDER',
+            senderName: 'Sender Node',
+            recipientId: routingEngine.localNodeId,
+            createdAt: DateTime.now().millisecondsSinceEpoch,
+            routeTrace: const ['NODE-SENDER'],
+            payload: {
+              'messageId': 'msg-marker-101',
+              'senderId': 'NODE-SENDER',
+              'senderName': 'Sender Node',
+              'recipientId': routingEngine.localNodeId,
+              'text':
+                  'Harap gunakan protokol SIAGAMESH_DAG_SYNC untuk sinkronisasi',
+              'timestamp': DateTime.now().millisecondsSinceEpoch,
+            },
+          );
+
+          fakeTransport.simulateIncomingPayload(
+            endpointId: 'ep-chat-marker',
+            bytes: chatEnvelope.toBytes(),
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+
+          // Pesan chat harus masuk ke ChatRepository
+          expect(fakeChatRepo.savedMessages.length, equals(1));
+          expect(
+            fakeChatRepo.savedMessages.first.text,
+            contains('SIAGAMESH_DAG_SYNC'),
+          );
+
+          // Tidak boleh diproses sebagai pesan gossip
+          expect(gossipEngine.totalHelloReceived, equals(0));
+          expect(gossipEngine.totalInvReceived, equals(0));
+
+          // Tidak boleh dicatat sebagai payload korup
+          final logs = logger.events;
+          expect(
+            logs.any(
+              (l) => l.failureReason == 'CORRUPT_OR_UNSUPPORTED_PAYLOAD',
+            ),
+            isFalse,
+          );
+        },
+      );
+
+      // 2. Payload gossip valid tetap menuju handler gossip
+      test(
+        '2. Valid gossip payload routes to gossip handler without entering ChatRepository',
+        () async {
+          gossipEngine.isEnabled = true;
+          fakeChatRepo.clearAllData();
+
+          final remoteHello = DagHelloMessage(
+            senderNodeId: 'NODE-B',
+            senderTimestamp: DateTime.now().toUtc().millisecondsSinceEpoch,
+            schemaVersion: 1,
+            activeBlocksCount: 1,
+            maxIndex: 0,
+            tipHashes: [ledger.genesisBlock.blockHash],
+            genesisHash: ledger.genesisBlock.blockHash,
+          );
+
+          fakeTransport.simulateIncomingPayload(
+            endpointId: 'ep-valid-gossip',
+            bytes: DagGossipCodec.encode(remoteHello),
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+
+          expect(gossipEngine.totalHelloReceived, equals(1));
+          expect(fakeChatRepo.savedMessages, isEmpty);
+        },
+      );
+
+      // 3. Pesan chat dan handshake normal tetap berfungsi saat gossip aktif
+      test(
+        '3. Normal chat and handshake messages function normally while gossip is active',
+        () async {
+          gossipEngine.isEnabled = true;
+          fakeChatRepo.clearAllData();
+
+          // Handshake
+          final hs = MessageEnvelope(
+            envelopeId: 'hs-node-h',
+            type: MessageEnvelope.typeHandshake,
+            senderId: 'NODE-H',
+            senderName: 'Node H',
+            recipientId: 'BROADCAST',
+            createdAt: DateTime.now().millisecondsSinceEpoch,
+            routeTrace: const ['NODE-H'],
+            payload: {'nodeId': 'NODE-H', 'nodeName': 'Node H'},
+          );
+          fakeTransport.simulateIncomingPayload(
+            endpointId: 'ep-h',
+            bytes: hs.toBytes(),
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+          expect(
+            routingEngine.neighborTable.getPeerByNodeId('NODE-H'),
+            isNotNull,
+          );
+
+          // Chat
+          final chat = MessageEnvelope(
+            envelopeId: 'chat-h',
+            type: MessageEnvelope.typeChat,
+            senderId: 'NODE-H',
+            senderName: 'Node H',
+            recipientId: routingEngine.localNodeId,
+            createdAt: DateTime.now().millisecondsSinceEpoch,
+            routeTrace: const ['NODE-H'],
+            payload: {
+              'messageId': 'm-h',
+              'senderId': 'NODE-H',
+              'senderName': 'Node H',
+              'recipientId': routingEngine.localNodeId,
+              'text': 'Normal message',
+            },
+          );
+          fakeTransport.simulateIncomingPayload(
+            endpointId: 'ep-h',
+            bytes: chat.toBytes(),
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+          expect(fakeChatRepo.savedMessages.length, equals(1));
+          expect(
+            fakeChatRepo.savedMessages.first.text,
+            equals('Normal message'),
+          );
+        },
+      );
+
+      // 4. Payload malformed tidak crash dan tidak menyebabkan salah klasifikasi
+      test(
+        '4. Malformed payloads do not crash and are not misclassified as valid chat',
+        () async {
+          gossipEngine.isEnabled = true;
+          fakeChatRepo.clearAllData();
+
+          // Payload A: Mengklaim protocol SIAGAMESH_DAG_SYNC tapi JSON terpotong/rusak
+          final brokenGossip = utf8.encode(
+            '{"protocol":"SIAGAMESH_DAG_SYNC", corrupted',
+          );
+          fakeTransport.simulateIncomingPayload(
+            endpointId: 'ep-bad-1',
+            bytes: Uint8List.fromList(brokenGossip),
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+
+          // Payload B: Mengklaim protocol SIAGAMESH_DAG_SYNC tapi struktur type/version tidak valid
+          final invalidGossipStructure = utf8.encode(
+            jsonEncode({
+              'protocol': 'SIAGAMESH_DAG_SYNC',
+              'version': 999,
+              'type': 'UNKNOWN_TYPE_XYZ',
+              'senderNodeId': 'ATTACKER',
+            }),
+          );
+          fakeTransport.simulateIncomingPayload(
+            endpointId: 'ep-bad-2',
+            bytes: Uint8List.fromList(invalidGossipStructure),
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+
+          // Payload C: Data biner acak bukan JSON
+          final randomBinary = Uint8List.fromList([
+            0xDE,
+            0xAD,
+            0xBE,
+            0xEF,
+            0x00,
+            0x12,
+          ]);
+          fakeTransport.simulateIncomingPayload(
+            endpointId: 'ep-bad-3',
+            bytes: randomBinary,
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+
+          // ChatRepository tetap bersih dari seluruh payload malformed
+          expect(fakeChatRepo.savedMessages, isEmpty);
+          expect(gossipEngine.totalHelloReceived, equals(0));
+          expect(gossipEngine.totalInvReceived, equals(0));
+        },
+      );
+
+      // 5. Pesan gossip tidak pernah masuk ke ChatRepository
+      test('5. Gossip messages never enter ChatRepository', () async {
+        gossipEngine.isEnabled = true;
+        fakeChatRepo.clearAllData();
+
+        final inv = DagInvMessage(
+          senderNodeId: 'NODE-B',
+          senderTimestamp: DateTime.now().toUtc().millisecondsSinceEpoch,
+          tipHashes: [ledger.genesisBlock.blockHash],
+        );
+        fakeTransport.simulateIncomingPayload(
+          endpointId: 'ep-inv-only',
+          bytes: DagGossipCodec.encode(inv),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        expect(fakeChatRepo.savedMessages, isEmpty);
+      });
+
+      // 6. sendBytes mengembalikan false ditangani secara aman
+      test(
+        '6. sendBytes returning false is handled gracefully without crash or state inconsistency',
+        () async {
+          final failingTransport = ControllableFakeMeshTransport(
+            sendResult: false,
+          );
+          final engine = DagGossipSyncEngine(
+            transport: failingTransport,
+            localNodeId: 'NODE-A',
+            ledger: ledger,
+            isEnabled: true,
+          );
+
+          failingTransport.simulateIncomingConnectionRequest(
+            endpointId: 'ep-fail',
+            endpointName: 'Fail Node',
+          );
+          await failingTransport.acceptConnection(endpointId: 'ep-fail');
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+
+          // Karena sendBytes false: totalHelloSent tidak bertambah dan helloSent bernilai false
+          expect(engine.totalHelloSent, equals(0));
+          final session = engine.getSession('ep-fail');
+          expect(session, isNotNull);
+          expect(session!.helloSent, isFalse);
+
+          engine.dispose();
+        },
+      );
+
+      // 7. sendBytes melempar exception ditangani secara aman tanpa unhandled error
+      test(
+        '7. sendBytes throwing an exception is handled gracefully without unhandled error',
+        () async {
+          final throwingTransport = ControllableFakeMeshTransport(
+            shouldThrow: true,
+          );
+          final engine = DagGossipSyncEngine(
+            transport: throwingTransport,
+            localNodeId: 'NODE-A',
+            ledger: ledger,
+            isEnabled: true,
+          );
+
+          throwingTransport.simulateIncomingConnectionRequest(
+            endpointId: 'ep-throw',
+            endpointName: 'Throw Node',
+          );
+          await throwingTransport.acceptConnection(endpointId: 'ep-throw');
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+
+          expect(engine.totalHelloSent, equals(0));
+          final session = engine.getSession('ep-throw');
+          expect(session, isNotNull);
+          expect(session!.helloSent, isFalse);
+
+          engine.dispose();
+        },
+      );
+
+      // 8. Disconnect selama pengiriman asinkron berjalan tidak menghasilkan unhandled exception atau zombie session
+      test(
+        '8. Disconnect during sending does not produce unhandled exception or zombie session',
+        () async {
+          final delayedTransport = ControllableFakeMeshTransport(
+            sendDelayMs: 40,
+          );
+          final engine = DagGossipSyncEngine(
+            transport: delayedTransport,
+            localNodeId: 'NODE-A',
+            ledger: ledger,
+            isEnabled: true,
+          );
+
+          delayedTransport.simulateIncomingConnectionRequest(
+            endpointId: 'ep-disconnect-race',
+            endpointName: 'Race Node',
+          );
+          await delayedTransport.acceptConnection(
+            endpointId: 'ep-disconnect-race',
+          );
+
+          // Segera simulasikan diskoneksi sebelum delay pengiriman selesai
+          delayedTransport.simulateDisconnection('ep-disconnect-race');
+          await Future<void>.delayed(const Duration(milliseconds: 80));
+
+          // Sesi harus terhapus dan tidak hidup kembali menjadi zombie
+          expect(engine.getSession('ep-disconnect-race'), isNull);
+          expect(engine.activeSessions, isEmpty);
+
+          engine.dispose();
+        },
+      );
+
+      // 9. Disable atau dispose saat operasi asinkron berjalan tidak menciptakan sesi baru atau resource yang bocor
+      test(
+        '9. Disable or dispose during async operation does not create new sessions or leak',
+        () async {
+          final delayedTransport = ControllableFakeMeshTransport(
+            sendDelayMs: 40,
+          );
+          final engine = DagGossipSyncEngine(
+            transport: delayedTransport,
+            localNodeId: 'NODE-A',
+            ledger: ledger,
+            isEnabled: true,
+          );
+
+          delayedTransport.simulateIncomingConnectionRequest(
+            endpointId: 'ep-dispose-race',
+            endpointName: 'Dispose Race Node',
+          );
+          await delayedTransport.acceptConnection(
+            endpointId: 'ep-dispose-race',
+          );
+
+          // Dispose saat pengiriman asinkron sedang berlangsung
+          engine.dispose();
+          await Future<void>.delayed(const Duration(milliseconds: 80));
+
+          expect(engine.isDisposed, isTrue);
+          expect(engine.isEnabled, isFalse);
+          expect(engine.activeSessions, isEmpty);
+        },
+      );
+
+      // 10. Inventaris identik tetap terdeduplikasi; inventaris berubah diproses; INV sebelum HELLO ditahan
+      test(
+        '10. Identical inventory remains deduplicated; changed inventory processed; INV before HELLO buffered',
+        () async {
+          gossipEngine.isEnabled = true;
+          final tip1 = computeSha256('tip-block-1');
+          final tip2 = computeSha256('tip-block-2');
+
+          final invBeforeHello = DagInvMessage(
+            senderNodeId: 'NODE-BUFFERED',
+            senderTimestamp: DateTime.now().toUtc().millisecondsSinceEpoch,
+            tipHashes: [tip1],
+            recentBlockHashes: const [],
+          );
+
+          // Kirim DAG_INV SEBELUM DAG_HELLO
+          fakeTransport.simulateIncomingPayload(
+            endpointId: 'ep-buffered',
+            bytes: DagGossipCodec.encode(invBeforeHello),
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+
+          final session = gossipEngine.getSession('ep-buffered');
+          expect(session, isNotNull);
+          expect(session!.helloReceived, isFalse);
+          // Karena DAG_HELLO belum ada, inventaris tertahan di pendingInv dan missingBlockHashes belum diisi
+          expect(session.pendingInv, isNotNull);
+          expect(session.missingBlockHashes, isEmpty);
+
+          // Sekarang kirim DAG_HELLO yang kompatibel
+          final helloMsg = DagHelloMessage(
+            senderNodeId: 'NODE-BUFFERED',
+            senderTimestamp: DateTime.now().toUtc().millisecondsSinceEpoch,
+            schemaVersion: 1,
+            activeBlocksCount: 1,
+            maxIndex: 0,
+            tipHashes: [ledger.genesisBlock.blockHash],
+            genesisHash: ledger.genesisBlock.blockHash,
+          );
+          fakeTransport.simulateIncomingPayload(
+            endpointId: 'ep-buffered',
+            bytes: DagGossipCodec.encode(helloMsg),
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+
+          // Setelah DAG_HELLO valid diterima, pendingInv otomatis diproses!
+          expect(session.helloReceived, isTrue);
+          expect(session.pendingInv, isNull);
+          expect(session.missingBlockHashes, contains(tip1));
+          expect(session.missingBlockHashes.length, equals(1));
+
+          // Kirim ulang inventaris identik -> deduplikasi (missingBlockHashes tetap 1)
+          fakeTransport.simulateIncomingPayload(
+            endpointId: 'ep-buffered',
+            bytes: DagGossipCodec.encode(invBeforeHello),
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+          expect(session.missingBlockHashes.length, equals(1));
+
+          // Kirim inventaris BERUBAH (menambahkan tip2) -> diproses!
+          final changedInv = DagInvMessage(
+            senderNodeId: 'NODE-BUFFERED',
+            senderTimestamp: DateTime.now().toUtc().millisecondsSinceEpoch,
+            tipHashes: [tip1, tip2],
+            recentBlockHashes: const [],
+          );
+          fakeTransport.simulateIncomingPayload(
+            endpointId: 'ep-buffered',
+            bytes: DagGossipCodec.encode(changedInv),
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+          expect(session.missingBlockHashes, contains(tip2));
+          expect(session.missingBlockHashes.length, equals(2));
+        },
+      );
+
+      // 11 & 12. Konfigurasi A, B tidak mengirim paket; Konfigurasi C memerlukan aktivasi eksplisit
+      test(
+        '11 & 12. Config A and B send no gossip packets; Config C requires explicit activation',
+        () async {
+          // Config A
+          ManetRoutingHolder.reset();
+          ManetRoutingHolder.setInstance(routingEngine);
+          expect(ManetRoutingHolder.enableBlockdagReplication, isFalse);
+
+          fakeTransport.clearSentPayloads();
+          fakeTransport.simulateIncomingConnectionRequest(
+            endpointId: 'ep-a',
+            endpointName: 'Peer A',
+          );
+          await fakeTransport.acceptConnection(endpointId: 'ep-a');
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+
+          expect(
+            fakeTransport.sentPayloads.any(
+              (p) => DagGossipSyncEngine.isGossipPayload(p.bytes),
+            ),
+            isFalse,
+          );
+
+          // Config B
+          ManetRoutingHolder.setIdsDetector(
+            SelectiveForwardingDetector(localNodeId: 'NODE-A'),
+          );
+          ManetRoutingHolder.setTrustManager(
+            DynamicTrustManager(localNodeId: 'NODE-A'),
+          );
+          expect(ManetRoutingHolder.enableBlockdagReplication, isFalse);
+
+          fakeTransport.clearSentPayloads();
+          fakeTransport.simulateIncomingConnectionRequest(
+            endpointId: 'ep-b-peer',
+            endpointName: 'Peer B',
+          );
+          await fakeTransport.acceptConnection(endpointId: 'ep-b-peer');
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+
+          expect(
+            fakeTransport.sentPayloads.any(
+              (p) => DagGossipSyncEngine.isGossipPayload(p.bytes),
+            ),
+            isFalse,
+          );
+
+          // Config C: Aktif hanya jika eksplisit
+          ManetRoutingHolder.setGossipSyncEngine(gossipEngine);
+          ManetRoutingHolder.setEnableBlockdagReplication(true);
+          expect(ManetRoutingHolder.enableBlockdagReplication, isTrue);
+          expect(gossipEngine.isEnabled, isTrue);
+
+          fakeTransport.clearSentPayloads();
+          fakeTransport.simulateIncomingConnectionRequest(
+            endpointId: 'ep-c-peer',
+            endpointName: 'Peer C',
+          );
+          await fakeTransport.acceptConnection(endpointId: 'ep-c-peer');
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+
+          expect(
+            fakeTransport.sentPayloads.any(
+              (p) => DagGossipSyncEngine.isGossipPayload(p.bytes),
+            ),
+            isTrue,
+          );
+        },
+      );
+    },
+  );
 }

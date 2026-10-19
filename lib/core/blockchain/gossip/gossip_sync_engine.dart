@@ -13,6 +13,7 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import '../../transport/mesh_transport.dart';
@@ -38,6 +39,7 @@ class PeerGossipSession {
   List<String> lastReceivedRecentHashes = [];
   final Set<String> missingBlockHashes = {};
   final Set<String> knownPeerBlockHashes = {};
+  DagInvMessage? pendingInv;
 
   DateTime lastActivity;
 
@@ -52,6 +54,7 @@ class DagGossipSyncEngine {
   final LightweightBlockdagLedger ledger;
 
   bool _isEnabled = false;
+  bool _isDisposed = false;
   StreamSubscription<TransportConnectionEvent>? _connectionSub;
 
   final Map<String, PeerGossipSession> _sessions = {};
@@ -78,6 +81,7 @@ class DagGossipSyncEngine {
   bool get isEnabled => _isEnabled;
 
   set isEnabled(bool value) {
+    if (_isDisposed) return;
     if (_isEnabled == value) return;
     _isEnabled = value;
     if (_isEnabled) {
@@ -87,6 +91,8 @@ class DagGossipSyncEngine {
       _sessions.clear();
     }
   }
+
+  bool get isDisposed => _isDisposed;
 
   int get totalHelloSent => _totalHelloSent;
   int get totalHelloReceived => _totalHelloReceived;
@@ -109,7 +115,18 @@ class DagGossipSyncEngine {
   void _initListeners() {
     _connectionSub?.cancel();
     _connectionSub = transport.connectionEventsStream.listen(
-      _handleConnectionEvent,
+      (event) {
+        _handleConnectionEvent(event).catchError((Object e) {
+          debugPrint(
+            '[DagGossipSyncEngine] Error asinkron pada _handleConnectionEvent: $e',
+          );
+        });
+      },
+      onError: (Object e) {
+        debugPrint(
+          '[DagGossipSyncEngine] Error pada connectionEventsStream transport: $e',
+        );
+      },
     );
   }
 
@@ -118,62 +135,54 @@ class DagGossipSyncEngine {
     _connectionSub = null;
   }
 
+  /// Pengecekan apakah payload Map menyatakan diri sebagai protokol gossip SiagaMesh DAG-Sync.
+  static bool claimsGossipProtocol(Map<String, dynamic> map) {
+    return map['protocol'] == kDagGossipProtocolName;
+  }
+
+  /// Pengecekan apakah payload Map merupakan paket protokol gossip yang sah dan dikenali.
+  static bool isGossipMap(Map<String, dynamic> map) {
+    if (map['protocol'] != kDagGossipProtocolName) return false;
+    final type = map['type'];
+    if (type is! String || DagGossipMessageType.fromWireName(type) == null) {
+      return false;
+    }
+    return true;
+  }
+
   /// Pengecekan cepat apakah payload byte merupakan paket protokol gossip SiagaMesh DAG-Sync.
   ///
-  /// Dilakukan tanpa decoding JSON penuh untuk menghindari overhead CPU pada jalur perutean obrolan.
+  /// Menjamin bahwa marker yang muncul hanya sebagai teks obrolan biasa di dalam envelope chat
+  /// TIDAK akan diklasifikasikan sebagai paket gossip.
   static bool isGossipPayload(Uint8List bytes) {
     if (bytes.length < 30 || bytes.length > kMaxRawGossipPayloadBytes) {
       return false;
     }
-    // Cek awal byte pertama '{' (0x7B)
     if (bytes[0] != 0x7B) {
       return false;
     }
-
-    // Pencarian cepat pola ASCII "SIAGAMESH_DAG_SYNC"
-    // Byte: S=83, I=73, A=65, G=71, A=65, M=77, E=69, S=83, H=72, _=95, D=68, A=65, G=71, _=95, S=83, Y=89, N=78, C=67
-    const marker = [
-      83,
-      73,
-      65,
-      71,
-      65,
-      77,
-      69,
-      83,
-      72,
-      95,
-      68,
-      65,
-      71,
-      95,
-      83,
-      89,
-      78,
-      67,
-    ];
-    final limit = bytes.length - marker.length;
-
-    for (int i = 0; i <= limit; i++) {
-      if (bytes[i] == marker[0]) {
-        bool match = true;
-        for (int j = 1; j < marker.length; j++) {
-          if (bytes[i + j] != marker[j]) {
-            match = false;
-            break;
-          }
-        }
-        if (match) return true;
+    try {
+      final jsonStr = utf8.decode(bytes);
+      final decoded = jsonDecode(jsonStr);
+      if (decoded is Map<String, dynamic>) {
+        return claimsGossipProtocol(decoded);
       }
-    }
+    } catch (_) {}
     return false;
   }
 
   /// Menangani peristiwa koneksi transport 1-hop.
-  void _handleConnectionEvent(TransportConnectionEvent event) async {
-    if (!_isEnabled) return;
+  Future<void> _handleConnectionEvent(TransportConnectionEvent event) async {
+    if (!_isEnabled || _isDisposed) return;
 
     if (event.status == PeerConnectionStatus.connected) {
+      // Cegah duplikasi pengiriman HELLO bila event connected diterima berulang untuk endpoint yang sama
+      final existing = _sessions[event.endpointId];
+      if (existing != null && existing.helloSent) {
+        existing.lastActivity = DateTime.now().toUtc();
+        return;
+      }
+
       final session = _sessions.putIfAbsent(
         event.endpointId,
         () => PeerGossipSession(endpointId: event.endpointId),
@@ -188,9 +197,9 @@ class DagGossipSyncEngine {
     }
   }
 
-  /// Mengirimkan pesan [DAG_HELLO] ke peer tertentu.
+  /// Mengirimkan pesan [DAG_HELLO] ke peer tertentu dengan batas isolasi error.
   Future<bool> _sendHello(String endpointId, PeerGossipSession session) async {
-    if (!_isEnabled) return false;
+    if (!_isEnabled || _isDisposed) return false;
 
     final tips = ledger.tipHashes.toList()..sort();
     final effectiveTips = tips.isEmpty ? [ledger.genesisBlock.blockHash] : tips;
@@ -211,10 +220,22 @@ class DagGossipSyncEngine {
     );
 
     final bytes = DagGossipCodec.encode(helloMsg);
-    final sent = await transport.sendBytes(
-      endpointId: endpointId,
-      bytes: bytes,
-    );
+    bool sent = false;
+    try {
+      sent = await transport.sendBytes(endpointId: endpointId, bytes: bytes);
+    } catch (e) {
+      debugPrint(
+        '[DagGossipSyncEngine] Exception saat sendHello ke $endpointId: $e',
+      );
+      sent = false;
+    }
+
+    if (!_isEnabled || _isDisposed) return false;
+    final currentSession = _sessions[endpointId];
+    if (currentSession == null || currentSession != session) {
+      // Sesi telah dibersihkan atau diganti saat operasi asinkron menunggu
+      return false;
+    }
 
     if (sent) {
       session.helloSent = true;
@@ -225,9 +246,9 @@ class DagGossipSyncEngine {
     return sent;
   }
 
-  /// Mengirimkan pesan [DAG_INV] ke peer tertentu.
+  /// Mengirimkan pesan [DAG_INV] ke peer tertentu dengan batas isolasi error.
   Future<bool> _sendInv(String endpointId, PeerGossipSession session) async {
-    if (!_isEnabled) return false;
+    if (!_isEnabled || _isDisposed) return false;
 
     final tips = ledger.tipHashes.toList()..sort();
     final effectiveTips = tips.isEmpty ? [ledger.genesisBlock.blockHash] : tips;
@@ -246,10 +267,21 @@ class DagGossipSyncEngine {
     );
 
     final bytes = DagGossipCodec.encode(invMsg);
-    final sent = await transport.sendBytes(
-      endpointId: endpointId,
-      bytes: bytes,
-    );
+    bool sent = false;
+    try {
+      sent = await transport.sendBytes(endpointId: endpointId, bytes: bytes);
+    } catch (e) {
+      debugPrint(
+        '[DagGossipSyncEngine] Exception saat sendInv ke $endpointId: $e',
+      );
+      sent = false;
+    }
+
+    if (!_isEnabled || _isDisposed) return false;
+    final currentSession = _sessions[endpointId];
+    if (currentSession == null || currentSession != session) {
+      return false;
+    }
 
     if (sent) {
       session.invSent = true;
@@ -260,21 +292,54 @@ class DagGossipSyncEngine {
     return sent;
   }
 
-  /// Menangani payload nirkabel yang masuk yang telah didispatch oleh perutean.
-  void handleIncomingPayload(TransportPayload payload) async {
-    if (!_isEnabled) return;
+  /// Menangani payload nirkabel yang masuk dari transport bytes mentah.
+  Future<void> handleIncomingPayload(TransportPayload payload) async {
+    final bytes = payload.bytes;
+    if (bytes.length < 30 || bytes.length > kMaxRawGossipPayloadBytes) {
+      return;
+    }
+    dynamic decoded;
+    try {
+      final jsonStr = utf8.decode(bytes);
+      decoded = jsonDecode(jsonStr);
+    } catch (_) {
+      return;
+    }
+    if (decoded is! Map<String, dynamic>) {
+      return;
+    }
+    await handleIncomingPayloadMap(
+      endpointId: payload.endpointId,
+      map: decoded,
+      rawByteLength: bytes.length,
+    );
+  }
 
-    _totalGossipBytesReceived += payload.bytes.length;
+  /// Menangani payload yang telah didekode menjadi Map JSON tanpa decoding ganda.
+  Future<void> handleIncomingPayloadMap({
+    required String endpointId,
+    required Map<String, dynamic> map,
+    required int rawByteLength,
+  }) async {
+    if (!_isEnabled || _isDisposed) return;
 
-    final decodeRes = DagGossipCodec.decode(payload.bytes);
+    _totalGossipBytesReceived += rawByteLength;
+
+    final decodeRes = DagGossipCodec.decodeFromMap(
+      map,
+      rawByteLength: rawByteLength,
+    );
     if (!decodeRes.isSuccess || decodeRes.message == null) {
+      debugPrint(
+        '[DagGossipSyncEngine] Payload gossip tidak valid dari $endpointId: ${decodeRes.errorCode} - ${decodeRes.errorMessage}',
+      );
       return;
     }
 
     final message = decodeRes.message!;
     final session = _sessions.putIfAbsent(
-      payload.endpointId,
-      () => PeerGossipSession(endpointId: payload.endpointId),
+      endpointId,
+      () => PeerGossipSession(endpointId: endpointId),
     );
     session.lastActivity = DateTime.now().toUtc();
 
@@ -286,7 +351,8 @@ class DagGossipSyncEngine {
         // Validasi kompatibilitas genesis hash dan schema version
         if (hello.genesisHash != ledger.genesisBlock.blockHash ||
             hello.schemaVersion != 1) {
-          // Jangan memproses peer dengan jaringan/skema yang tidak kompatibel
+          // Jangan memproses peer dengan jaringan/skema yang tidak kompatibel; bersihkan sesi
+          _sessions.remove(endpointId);
           return;
         }
 
@@ -298,7 +364,14 @@ class DagGossipSyncEngine {
 
         // Balas dengan inventaris lokal jika belum pernah dikirim pada sesi ini
         if (!session.invSent) {
-          await _sendInv(payload.endpointId, session);
+          await _sendInv(endpointId, session);
+        }
+
+        // Jika sebelumnya ada DAG_INV yang tertahan menunggu verifikasi DAG_HELLO, proses sekarang
+        if (session.pendingInv != null) {
+          final pending = session.pendingInv!;
+          session.pendingInv = null;
+          _processInv(session, pending);
         }
         break;
 
@@ -307,41 +380,55 @@ class DagGossipSyncEngine {
         _totalInvReceived++;
         session.remoteNodeId = inv.senderNodeId;
 
-        // Deduplikasi: Abaikan jika inventaris yang diumumkan identik dengan yang baru saja diterima
-        if (_isDuplicateInventory(session, inv)) {
+        // Validasi urutan protokol: jika DAG_HELLO yang kompatibel belum diterima,
+        // tahan inventaris di pendingInv hingga DAG_HELLO yang valid diverifikasi
+        if (!session.helloReceived) {
+          session.pendingInv = inv;
+          if (!session.helloSent) {
+            await _sendHello(endpointId, session);
+          }
           return;
         }
 
-        session.lastReceivedTipHashes = List.from(inv.tipHashes);
-        session.lastReceivedRecentHashes = List.from(inv.recentBlockHashes);
-        session.invReceived = true;
-
-        // Bandingkan hash inventaris yang diumumkan dengan ledger lokal
-        final allAnnouncedHashes = <String>{
-          ...inv.tipHashes,
-          ...inv.recentBlockHashes,
-        };
-
-        for (final hash in allAnnouncedHashes) {
-          final existsInActive = ledger.getBlock(hash) != null;
-          final existsInProcessed = ledger.processedBlockHashes.contains(hash);
-          final existsInCheckpoints = ledger.checkpoints.any(
-            (c) =>
-                c.retainedGenesisHash == hash ||
-                c.prunedBlockHashes.contains(hash),
-          );
-
-          if (existsInActive || existsInProcessed || existsInCheckpoints) {
-            session.knownPeerBlockHashes.add(hash);
-          } else {
-            session.missingBlockHashes.add(hash);
-          }
-        }
+        _processInv(session, inv);
         break;
 
       default:
         // Tipe pesan lain (DAG_GET_BLOCKS, DAG_BLOCK_BATCH, dll) belum diaktifkan pada tahap ini
         break;
+    }
+  }
+
+  /// Memproses perbandingan hash inventaris [DAG_INV] terhadap status ledger lokal.
+  void _processInv(PeerGossipSession session, DagInvMessage inv) {
+    // Deduplikasi: Abaikan jika inventaris yang diumumkan identik dengan yang baru saja diterima
+    if (_isDuplicateInventory(session, inv)) {
+      return;
+    }
+
+    session.lastReceivedTipHashes = List.from(inv.tipHashes);
+    session.lastReceivedRecentHashes = List.from(inv.recentBlockHashes);
+    session.invReceived = true;
+
+    // Bandingkan hash inventaris yang diumumkan dengan ledger lokal
+    final allAnnouncedHashes = <String>{
+      ...inv.tipHashes,
+      ...inv.recentBlockHashes,
+    };
+
+    for (final hash in allAnnouncedHashes) {
+      final existsInActive = ledger.getBlock(hash) != null;
+      final existsInProcessed = ledger.processedBlockHashes.contains(hash);
+      final existsInCheckpoints = ledger.checkpoints.any(
+        (c) =>
+            c.retainedGenesisHash == hash || c.prunedBlockHashes.contains(hash),
+      );
+
+      if (existsInActive || existsInProcessed || existsInCheckpoints) {
+        session.knownPeerBlockHashes.add(hash);
+      } else {
+        session.missingBlockHashes.add(hash);
+      }
     }
   }
 
@@ -366,6 +453,7 @@ class DagGossipSyncEngine {
 
   /// Membersihkan seluruh resources, membatalkan subscription, dan mengosongkan sesi.
   void dispose() {
+    _isDisposed = true;
     _isEnabled = false;
     _disposeListeners();
     _sessions.clear();

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 import '../../features/chat/data/repositories/chat_repository.dart';
@@ -148,40 +149,66 @@ class ManetRoutingEngine {
   // --- Penanganan Payload Nirkabel Masuk ---
 
   void _handleIncomingPayload(TransportPayload payload) async {
-    // 0. Dispatch payload protokol gossip BlockDAG (DAG-Sync) tanpa mem-parse sebagai chat envelope
-    if (DagGossipSyncEngine.isGossipPayload(payload.bytes)) {
-      if (gossipSyncEngine != null && gossipSyncEngine!.isEnabled) {
-        try {
-          gossipSyncEngine!.handleIncomingPayload(payload);
-        } catch (e) {
-          debugPrint(
-            '[RoutingEngine] Kesalahan pada penanganan payload gossip: $e',
-          );
+    final bytes = payload.bytes;
+    if (bytes.isEmpty) return;
+
+    // Decoding JSON sekali saja untuk seluruh alur routing dan gossip
+    dynamic decodedJson;
+    try {
+      final jsonStr = utf8.decode(bytes);
+      decodedJson = jsonDecode(jsonStr);
+    } catch (_) {
+      // Bukan encoding UTF-8 atau JSON valid
+    }
+
+    if (decodedJson is Map<String, dynamic>) {
+      // 0. Dispatch payload protokol gossip BlockDAG (DAG-Sync) tanpa mem-parse sebagai chat envelope
+      if (DagGossipSyncEngine.claimsGossipProtocol(decodedJson)) {
+        if (gossipSyncEngine != null && gossipSyncEngine!.isEnabled) {
+          try {
+            await gossipSyncEngine!.handleIncomingPayloadMap(
+              endpointId: payload.endpointId,
+              map: decodedJson,
+              rawByteLength: bytes.length,
+            );
+          } catch (e) {
+            debugPrint(
+              '[RoutingEngine] Kesalahan pada penanganan payload gossip: $e',
+            );
+          }
         }
+        // Hentikan pemrosesan agar tidak di-parse sebagai chat MessageEnvelope atau masuk ChatRepository
+        return;
       }
-      // Hentikan pemrosesan agar tidak di-parse sebagai chat MessageEnvelope atau dilaporkan korup
-      return;
+
+      // 1. Coba parse sebagai MessageEnvelope obrolan/routing
+      final envelope = MessageEnvelope.fromMap(decodedJson);
+      if (envelope != null) {
+        await _processIncomingEnvelope(envelope, payload);
+        return;
+      }
     }
 
-    final envelope = MessageEnvelope.fromBytes(payload.bytes);
-    if (envelope == null) {
-      // Tolak data korup, tidak lengkap, atau versi tidak didukung secara aman
-      experimentLogger?.log(
-        envelopeId: 'corrupted',
-        messageId: 'corrupted',
-        senderId: 'unknown',
-        recipientId: localNodeId,
-        eventType: MeshExperimentEventType.rejected,
-        hopCount: 0,
-        routeTrace: const [],
-        connectionStatus: 'CONNECTED',
-        activeNeighborCount: neighborTable.activeNeighbors.length,
-        failureReason: 'CORRUPT_OR_UNSUPPORTED_PAYLOAD',
-        outcome: 'DROPPED',
-      );
-      return;
-    }
+    // 2. Tolak data korup, tidak lengkap, atau versi tidak didukung secara aman
+    experimentLogger?.log(
+      envelopeId: 'corrupted',
+      messageId: 'corrupted',
+      senderId: 'unknown',
+      recipientId: localNodeId,
+      eventType: MeshExperimentEventType.rejected,
+      hopCount: 0,
+      routeTrace: const [],
+      connectionStatus: 'CONNECTED',
+      activeNeighborCount: neighborTable.activeNeighbors.length,
+      failureReason: 'CORRUPT_OR_UNSUPPORTED_PAYLOAD',
+      outcome: 'DROPPED',
+    );
+  }
 
+  Future<void> _processIncomingEnvelope(
+    MessageEnvelope envelope,
+    TransportPayload payload,
+  ) async {
     // 1. Tangani Handshake Identitas
     if (envelope.type == MessageEnvelope.typeHandshake) {
       final remoteNodeId =

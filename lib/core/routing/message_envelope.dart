@@ -81,6 +81,53 @@ class MessageEnvelope {
     return Uint8List.fromList(utf8.encode(jsonStr));
   }
 
+  /// Membaca Map JSON dan memvalidasi struktur envelope perutean.
+  ///
+  /// Mengembalikan `null` secara aman jika data korup, tidak lengkap,
+  /// atau menggunakan versi yang belum didukung.
+  static MessageEnvelope? fromMap(Map<String, dynamic> decoded) {
+    final version = decoded['version'] as int? ?? 1;
+    if (version > currentVersion) {
+      return null; // Tolak versi masa depan
+    }
+
+    final envelopeId = decoded['envelopeId'] as String?;
+    final type = decoded['type'] as String?;
+    final senderId = decoded['senderId'] as String?;
+    final senderName = decoded['senderName'] as String?;
+    final recipientId = decoded['recipientId'] as String?;
+    final createdAt = decoded['createdAt'] as int?;
+    final ttl = decoded['ttl'] as int? ?? defaultTtl;
+    final hopCount = decoded['hopCount'] as int? ?? 0;
+    final rawRouteTrace = decoded['routeTrace'] as List<dynamic>? ?? [];
+    final payload = decoded['payload'] as Map<String, dynamic>? ?? {};
+
+    if (envelopeId == null ||
+        type == null ||
+        senderId == null ||
+        senderName == null ||
+        recipientId == null ||
+        createdAt == null) {
+      return null;
+    }
+
+    final routeTrace = rawRouteTrace.map((e) => e.toString()).toList();
+
+    return MessageEnvelope(
+      version: version,
+      envelopeId: envelopeId,
+      type: type,
+      senderId: senderId,
+      senderName: senderName,
+      recipientId: recipientId,
+      createdAt: createdAt,
+      ttl: ttl,
+      hopCount: hopCount,
+      routeTrace: routeTrace,
+      payload: payload,
+    );
+  }
+
   /// Membaca array byte dari transport dan memvalidasi struktur envelope perutean.
   ///
   /// Mengembalikan `null` secara aman jika data korup, tidak lengkap,
@@ -98,46 +145,7 @@ class MessageEnvelope {
         return null;
       }
 
-      final version = decoded['version'] as int? ?? 1;
-      if (version > currentVersion) {
-        return null; // Tolak versi masa depan
-      }
-
-      final envelopeId = decoded['envelopeId'] as String?;
-      final type = decoded['type'] as String?;
-      final senderId = decoded['senderId'] as String?;
-      final senderName = decoded['senderName'] as String?;
-      final recipientId = decoded['recipientId'] as String?;
-      final createdAt = decoded['createdAt'] as int?;
-      final ttl = decoded['ttl'] as int? ?? defaultTtl;
-      final hopCount = decoded['hopCount'] as int? ?? 0;
-      final rawRouteTrace = decoded['routeTrace'] as List<dynamic>? ?? [];
-      final payload = decoded['payload'] as Map<String, dynamic>? ?? {};
-
-      if (envelopeId == null ||
-          type == null ||
-          senderId == null ||
-          senderName == null ||
-          recipientId == null ||
-          createdAt == null) {
-        return null;
-      }
-
-      final routeTrace = rawRouteTrace.map((e) => e.toString()).toList();
-
-      return MessageEnvelope(
-        version: version,
-        envelopeId: envelopeId,
-        type: type,
-        senderId: senderId,
-        senderName: senderName,
-        recipientId: recipientId,
-        createdAt: createdAt,
-        ttl: ttl,
-        hopCount: hopCount,
-        routeTrace: routeTrace,
-        payload: payload,
-      );
+      return fromMap(decoded);
     } catch (_) {
       return null;
     }
