@@ -5,6 +5,7 @@ import '../../features/chat/data/repositories/chat_repository.dart';
 import '../../features/chat/models/chat_message.dart';
 import '../transport/mesh_transport.dart';
 import '../ids/selective_forwarding_detector.dart';
+import '../trust/dynamic_trust_manager.dart';
 import 'deduplication_cache.dart';
 import 'mesh_experiment_logger.dart';
 import 'message_envelope.dart';
@@ -29,7 +30,9 @@ class ManetRoutingEngine {
   final ChatRepository? repository;
   final MeshExperimentLogger? experimentLogger;
   final SelectiveForwardingDetector? idsDetector;
+  final DynamicTrustManager? trustManager;
   final bool enableHopAck;
+  final bool enableTrustRoutingPolicy;
 
   StreamSubscription<TransportConnectionEvent>? _eventsSub;
   StreamSubscription<TransportPayload>? _payloadSub;
@@ -48,12 +51,22 @@ class ManetRoutingEngine {
     this.repository,
     this.experimentLogger,
     this.idsDetector,
+    this.trustManager,
     this.enableHopAck = false,
+    this.enableTrustRoutingPolicy = false,
   }) : neighborTable = neighborTable ?? NeighborTable(),
        dedupCache = dedupCache ?? DeduplicationCache(),
        storeAndForwardQueue = storeAndForwardQueue ?? StoreAndForwardQueue() {
     if (idsDetector != null && experimentLogger != null) {
       idsDetector!.experimentLogger ??= experimentLogger;
+    }
+    if (trustManager != null && experimentLogger != null) {
+      trustManager!.experimentLogger ??= experimentLogger;
+    }
+    if (idsDetector != null && trustManager != null) {
+      idsDetector!.detectionEventsStream.listen((event) {
+        trustManager!.observeIdsEvent(event);
+      });
     }
     _initListeners();
   }
@@ -400,17 +413,38 @@ class ManetRoutingEngine {
 
     // Controlled Flooding: Kirim ke semua tetangga aktif selain pengirim asal
     // dan selain node yang sudah tercatat di route trace
-    bool anySent = false;
-    for (final neighbor in activeNeighbors) {
-      if (neighbor.endpointId == sourceEndpointId) {
-        // Jangan mengirim kembali ke peer asal yang baru saja mengirimkan paket!
-        continue;
-      }
-      if (forwardedEnvelope.routeTrace.contains(neighbor.nodeId)) {
-        // Jangan mengirim ke node yang sudah ada di jejak rute!
-        continue;
-      }
+    var candidateNeighbors = activeNeighbors.where((neighbor) {
+      if (neighbor.endpointId == sourceEndpointId) return false;
+      if (forwardedEnvelope.routeTrace.contains(neighbor.nodeId)) return false;
+      return true;
+    }).toList();
 
+    // Saring kandidat perantara berdasarkan kebijakan Dynamic Trust jika diaktifkan (Konfigurasi B)
+    if (enableTrustRoutingPolicy && trustManager != null) {
+      candidateNeighbors = trustManager!.filterForwardingPeers<NeighborPeer>(
+        peers: candidateNeighbors,
+        getNodeId: (n) => n.nodeId,
+        destinationId: forwardedEnvelope.recipientId,
+        onDecision: (peerId, decision, score) {
+          experimentLogger?.log(
+            envelopeId: forwardedEnvelope.envelopeId,
+            messageId: messageId,
+            senderId: localNodeId,
+            recipientId: peerId,
+            eventType: MeshExperimentEventType.forwarded,
+            hopCount: forwardedEnvelope.hopCount,
+            routeTrace: forwardedEnvelope.routeTrace,
+            connectionStatus: 'ACTIVE',
+            activeNeighborCount: activeNeighbors.length,
+            outcome: decision,
+            syntheticMetadata: {'trustScore': score, 'decision': decision},
+          );
+        },
+      );
+    }
+
+    bool anySent = false;
+    for (final neighbor in candidateNeighbors) {
       try {
         final sent = await transport.sendBytes(
           endpointId: neighbor.endpointId,
@@ -442,7 +476,7 @@ class ManetRoutingEngine {
 
       // Daftarkan ekspektasi ke seluruh tetangga downstream jika TTL > 1
       if (idsDetector != null && forwardedEnvelope.ttl > 1) {
-        for (final neighbor in activeNeighbors) {
+        for (final neighbor in candidateNeighbors) {
           if (neighbor.endpointId != sourceEndpointId &&
               neighbor.nodeId != forwardedEnvelope.recipientId &&
               !forwardedEnvelope.routeTrace.contains(neighbor.nodeId)) {
@@ -642,8 +676,32 @@ class ManetRoutingEngine {
         }
       } catch (_) {}
     } else if (activeNeighbors.isNotEmpty) {
-      // Flooding ke seluruh tetangga aktif
-      for (final neighbor in activeNeighbors) {
+      var targetNeighbors = activeNeighbors;
+      if (enableTrustRoutingPolicy && trustManager != null) {
+        targetNeighbors = trustManager!.filterForwardingPeers<NeighborPeer>(
+          peers: activeNeighbors,
+          getNodeId: (n) => n.nodeId,
+          destinationId: recipientNodeId,
+          onDecision: (peerId, decision, score) {
+            experimentLogger?.log(
+              envelopeId: envelopeId,
+              messageId: messageId,
+              senderId: localNodeId,
+              recipientId: peerId,
+              eventType: MeshExperimentEventType.sentToTransport,
+              hopCount: 0,
+              routeTrace: [localNodeId],
+              connectionStatus: 'ACTIVE',
+              activeNeighborCount: activeNeighbors.length,
+              outcome: decision,
+              syntheticMetadata: {'trustScore': score, 'decision': decision},
+            );
+          },
+        );
+      }
+
+      // Flooding ke seluruh tetangga yang memenuhi syarat kebijakan
+      for (final neighbor in targetNeighbors) {
         try {
           final ok = await transport.sendBytes(
             endpointId: neighbor.endpointId,
@@ -662,12 +720,12 @@ class ManetRoutingEngine {
           hopCount: 0,
           routeTrace: [localNodeId],
           connectionStatus: 'CONNECTED',
-          activeNeighborCount: activeNeighbors.length,
+          activeNeighborCount: targetNeighbors.length,
           outcome: 'TRANSMITTED_FLOODING',
         );
 
         if (idsDetector != null && envelope.ttl > 1) {
-          for (final neighbor in activeNeighbors) {
+          for (final neighbor in targetNeighbors) {
             if (neighbor.nodeId != recipientNodeId) {
               idsDetector?.registerForwardingExpected(
                 peerNodeId: neighbor.nodeId,

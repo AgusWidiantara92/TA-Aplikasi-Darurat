@@ -11,6 +11,7 @@ enum MeshExperimentEventType {
   expired,
   rejected,
   idsDetection,
+  trustUpdate,
 }
 
 /// Representasi data satu peristiwa eksperimen perutean terkendali SiagaMesh.
@@ -224,6 +225,98 @@ class MeshExperimentLogger {
       activeNeighborCount: 1,
       failureReason: reason,
       outcome: status,
+      syntheticMetadata: syntheticMeta,
+    );
+
+    if (_events.length >= maxEvents) {
+      _events.removeAt(0);
+    }
+    _events.add(event);
+
+    if (!_controller.isClosed) {
+      _controller.add(event);
+    }
+  }
+
+  /// Mencatat peristiwa pembaruan skor Dynamic Trust ke dalam log eksperimen.
+  void logTrustUpdate({
+    required String targetNodeId,
+    required String observerNodeId,
+    required double oldScore,
+    required double newScore,
+    required String evidenceType,
+    required String evaluationStatus,
+    required String reason,
+    required int totalObservations,
+    required double positiveEvidenceSum,
+    required double negativeEvidenceSum,
+    required int linkFailureCount,
+    required int protocolDropCount,
+    int? relayClaimCount,
+    int? downstreamConfirmedCount,
+    int? deliveryConfirmedCount,
+    int? unconfirmedDropCount,
+    required Map<String, dynamic> thresholdConfig,
+    String? runId,
+    String? simulationGroundTruth,
+  }) {
+    _eventCounter++;
+    final syntheticMeta = <String, dynamic>{
+      'targetNodeId': targetNodeId,
+      'observerNodeId': observerNodeId,
+      'oldScore': oldScore,
+      'newScore': newScore,
+      'delta': newScore - oldScore,
+      'evidenceType': evidenceType,
+      'evaluationStatus': evaluationStatus,
+      'reason': reason,
+      'totalObservations': totalObservations,
+      'positiveEvidenceSum': positiveEvidenceSum,
+      'negativeEvidenceSum': negativeEvidenceSum,
+      'linkFailureCount': linkFailureCount,
+      'protocolDropCount': protocolDropCount,
+      'thresholdConfig': thresholdConfig,
+    };
+    if (relayClaimCount != null) {
+      syntheticMeta['relayClaimCount'] = relayClaimCount;
+    }
+    if (downstreamConfirmedCount != null) {
+      syntheticMeta['downstreamConfirmedCount'] = downstreamConfirmedCount;
+    }
+    if (deliveryConfirmedCount != null) {
+      syntheticMeta['deliveryConfirmedCount'] = deliveryConfirmedCount;
+    }
+    if (unconfirmedDropCount != null) {
+      syntheticMeta['unconfirmedDropCount'] = unconfirmedDropCount;
+    }
+    if (relayClaimCount != null &&
+        downstreamConfirmedCount != null &&
+        deliveryConfirmedCount != null) {
+      syntheticMeta['protocolResponsivenessCount'] = relayClaimCount;
+      syntheticMeta['verifiedForwardingCount'] =
+          downstreamConfirmedCount + deliveryConfirmedCount;
+    }
+    if (simulationGroundTruth != null) {
+      syntheticMeta['simulationGroundTruth'] = simulationGroundTruth;
+    }
+
+    final event = MeshExperimentEvent(
+      eventId: 'trust-$_eventCounter',
+      runId: runId ?? activeRunId,
+      testType: activeTestType,
+      envelopeId: 'TRUST-$targetNodeId-$_eventCounter',
+      messageId: 'SCORE-${newScore.toStringAsFixed(2)}',
+      senderId: observerNodeId,
+      recipientId: targetNodeId,
+      eventType: MeshExperimentEventType.trustUpdate,
+      localTimestamp: DateTime.now(),
+      monotonicMicros: _stopwatch.elapsedMicroseconds,
+      hopCount: 0,
+      routeTrace: [observerNodeId, targetNodeId],
+      connectionStatus: 'ACTIVE',
+      activeNeighborCount: 1,
+      failureReason: reason,
+      outcome: evaluationStatus,
       syntheticMetadata: syntheticMeta,
     );
 

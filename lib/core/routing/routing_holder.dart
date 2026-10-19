@@ -1,6 +1,7 @@
 import '../../features/chat/data/repositories/chat_repository.dart';
 import '../ids/selective_forwarding_detector.dart';
 import '../transport/transport_holder.dart';
+import '../trust/dynamic_trust_manager.dart';
 import 'manet_routing_engine.dart';
 import 'mesh_experiment_logger.dart';
 import 'node_identity.dart';
@@ -13,6 +14,8 @@ class ManetRoutingHolder {
   static ManetRoutingEngine? _instance;
   static MeshExperimentLogger? _logger;
   static SelectiveForwardingDetector? _idsDetector;
+  static DynamicTrustManager? _trustManager;
+  static bool _enableTrustRoutingPolicy = false;
 
   static MeshExperimentLogger get logger => _logger ??= MeshExperimentLogger();
 
@@ -26,6 +29,18 @@ class ManetRoutingHolder {
     _idsDetector = detector;
   }
 
+  static DynamicTrustManager? get trustManager => _trustManager;
+
+  static void setTrustManager(DynamicTrustManager? manager) {
+    _trustManager = manager;
+  }
+
+  static bool get enableTrustRoutingPolicy => _enableTrustRoutingPolicy;
+
+  static void setEnableTrustRoutingPolicy(bool enable) {
+    _enableTrustRoutingPolicy = enable;
+  }
+
   static ManetRoutingEngine get instance {
     return _instance ??= ManetRoutingEngine(
       transport: MeshTransportHolder.instance,
@@ -34,6 +49,8 @@ class ManetRoutingHolder {
       experimentLogger: logger,
       idsDetector: _idsDetector,
       enableHopAck: _idsDetector != null,
+      trustManager: _trustManager,
+      enableTrustRoutingPolicy: _enableTrustRoutingPolicy,
     );
   }
 
@@ -47,5 +64,8 @@ class ManetRoutingHolder {
     _instance = null;
     _idsDetector?.dispose();
     _idsDetector = null;
+    _trustManager?.dispose();
+    _trustManager = null;
+    _enableTrustRoutingPolicy = false;
   }
 }
