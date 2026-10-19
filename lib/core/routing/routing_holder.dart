@@ -1,6 +1,7 @@
 import '../../features/chat/data/repositories/chat_repository.dart';
 import '../transport/transport_holder.dart';
 import 'manet_routing_engine.dart';
+import 'mesh_experiment_logger.dart';
 import 'node_identity.dart';
 
 /// Container singleton penyimpan instance [ManetRoutingEngine] aktif aplikasi SiagaMesh.
@@ -9,12 +10,20 @@ import 'node_identity.dart';
 /// dan integrasi transparan pada lapisan widget aplikasi.
 class ManetRoutingHolder {
   static ManetRoutingEngine? _instance;
+  static MeshExperimentLogger? _logger;
+
+  static MeshExperimentLogger get logger => _logger ??= MeshExperimentLogger();
+
+  static void setLogger(MeshExperimentLogger? logger) {
+    _logger = logger;
+  }
 
   static ManetRoutingEngine get instance {
     return _instance ??= ManetRoutingEngine(
       transport: MeshTransportHolder.instance,
       identityManager: NodeIdentityManager(),
       repository: ChatRepositoryHolder.instance,
+      experimentLogger: logger,
     );
   }
 

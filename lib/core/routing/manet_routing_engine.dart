@@ -5,6 +5,7 @@ import '../../features/chat/data/repositories/chat_repository.dart';
 import '../../features/chat/models/chat_message.dart';
 import '../transport/mesh_transport.dart';
 import 'deduplication_cache.dart';
+import 'mesh_experiment_logger.dart';
 import 'message_envelope.dart';
 import 'neighbor_table.dart';
 import 'node_identity.dart';
@@ -25,6 +26,7 @@ class ManetRoutingEngine {
   final DeduplicationCache dedupCache;
   final StoreAndForwardQueue storeAndForwardQueue;
   final ChatRepository? repository;
+  final MeshExperimentLogger? experimentLogger;
 
   StreamSubscription<TransportConnectionEvent>? _eventsSub;
   StreamSubscription<TransportPayload>? _payloadSub;
@@ -41,6 +43,7 @@ class ManetRoutingEngine {
     DeduplicationCache? dedupCache,
     StoreAndForwardQueue? storeAndForwardQueue,
     this.repository,
+    this.experimentLogger,
   }) : neighborTable = neighborTable ?? NeighborTable(),
        dedupCache = dedupCache ?? DeduplicationCache(),
        storeAndForwardQueue = storeAndForwardQueue ?? StoreAndForwardQueue() {
@@ -116,6 +119,19 @@ class ManetRoutingEngine {
     final envelope = MessageEnvelope.fromBytes(payload.bytes);
     if (envelope == null) {
       // Tolak data korup, tidak lengkap, atau versi tidak didukung secara aman
+      experimentLogger?.log(
+        envelopeId: 'corrupted',
+        messageId: 'corrupted',
+        senderId: 'unknown',
+        recipientId: localNodeId,
+        eventType: MeshExperimentEventType.rejected,
+        hopCount: 0,
+        routeTrace: const [],
+        connectionStatus: 'CONNECTED',
+        activeNeighborCount: neighborTable.activeNeighbors.length,
+        failureReason: 'CORRUPT_OR_UNSUPPORTED_PAYLOAD',
+        outcome: 'DROPPED',
+      );
       return;
     }
 
@@ -139,21 +155,63 @@ class ManetRoutingEngine {
 
     // 2. Tangani Pesan Obrolan (CHAT_MESSAGE)
     if (envelope.type == MessageEnvelope.typeChat) {
+      final messageId =
+          envelope.payload['messageId'] as String? ?? envelope.envelopeId;
+
       // Aturan A: Pemeriksaan Deduplikasi
       if (dedupCache.checkAndAdd(envelope.envelopeId)) {
         // Pesan duplikat telah dilihat sebelumnya, hentikan penyebaran!
+        experimentLogger?.log(
+          envelopeId: envelope.envelopeId,
+          messageId: messageId,
+          senderId: envelope.senderId,
+          recipientId: envelope.recipientId,
+          eventType: MeshExperimentEventType.rejected,
+          hopCount: envelope.hopCount,
+          routeTrace: envelope.routeTrace,
+          connectionStatus: 'CONNECTED',
+          activeNeighborCount: neighborTable.activeNeighbors.length,
+          failureReason: 'DEDUP_CACHE_HIT',
+          outcome: 'DROPPED_DUPLICATE',
+        );
         return;
       }
 
       // Aturan B: Pencegahan Loop Perutean
       if (envelope.routeTrace.contains(localNodeId)) {
         // Pesan sudah pernah melewati node ini sebelumnya, hentikan loop!
+        experimentLogger?.log(
+          envelopeId: envelope.envelopeId,
+          messageId: messageId,
+          senderId: envelope.senderId,
+          recipientId: envelope.recipientId,
+          eventType: MeshExperimentEventType.rejected,
+          hopCount: envelope.hopCount,
+          routeTrace: envelope.routeTrace,
+          connectionStatus: 'CONNECTED',
+          activeNeighborCount: neighborTable.activeNeighbors.length,
+          failureReason: 'ROUTE_LOOP_DETECTED',
+          outcome: 'DROPPED_LOOP',
+        );
         return;
       }
 
       // Aturan C: Pemeriksaan Batas Hop / TTL
       if (envelope.ttl <= 0) {
         // Masa hidup paket habis, buang!
+        experimentLogger?.log(
+          envelopeId: envelope.envelopeId,
+          messageId: messageId,
+          senderId: envelope.senderId,
+          recipientId: envelope.recipientId,
+          eventType: MeshExperimentEventType.expired,
+          hopCount: envelope.hopCount,
+          routeTrace: envelope.routeTrace,
+          connectionStatus: 'CONNECTED',
+          activeNeighborCount: neighborTable.activeNeighbors.length,
+          failureReason: 'TTL_EXPIRED',
+          outcome: 'DROPPED_EXPIRED',
+        );
         return;
       }
 
@@ -166,6 +224,23 @@ class ManetRoutingEngine {
         await _deliverToLocalApp(envelope, isBroadcast: isBroadcast);
         _incomingMessagesController.add(envelope);
 
+        experimentLogger?.log(
+          envelopeId: envelope.envelopeId,
+          messageId: messageId,
+          senderId: envelope.senderId,
+          recipientId: envelope.recipientId,
+          eventType: MeshExperimentEventType.received,
+          hopCount: envelope.hopCount,
+          routeTrace: envelope.routeTrace,
+          connectionStatus: 'CONNECTED',
+          activeNeighborCount: neighborTable.activeNeighbors.length,
+          outcome: 'DELIVERED_TO_APP',
+          syntheticMetadata: {
+            'isBroadcast': isBroadcast,
+            'isEmergency': envelope.payload['isEmergency'] == true,
+          },
+        );
+
         // Jika pesan siaran (BROADCAST), teruskan juga ke tetangga lain jika TTL masih tersisa
         if (isBroadcast && envelope.ttl > 1) {
           await _forwardToOtherNeighbors(
@@ -176,6 +251,19 @@ class ManetRoutingEngine {
       } else {
         // Node ini HANYA PERANTARA (Relay Node)!
         // Wajib: Jangan mencampur pesan dengan percakapan lokal node perantara
+        experimentLogger?.log(
+          envelopeId: envelope.envelopeId,
+          messageId: messageId,
+          senderId: envelope.senderId,
+          recipientId: envelope.recipientId,
+          eventType: MeshExperimentEventType.received,
+          hopCount: envelope.hopCount,
+          routeTrace: envelope.routeTrace,
+          connectionStatus: 'CONNECTED',
+          activeNeighborCount: neighborTable.activeNeighbors.length,
+          outcome: 'RELAY_TRANSIT',
+        );
+
         if (envelope.ttl > 1) {
           await _forwardToOtherNeighbors(
             envelope: envelope,
@@ -193,6 +281,9 @@ class ManetRoutingEngine {
   }) async {
     final forwardedEnvelope = envelope.createForwardedCopy(localNodeId);
     final activeNeighbors = neighborTable.activeNeighbors;
+    final messageId =
+        forwardedEnvelope.payload['messageId'] as String? ??
+        forwardedEnvelope.envelopeId;
 
     // Jika tujuan unicast langsung terhubung, kirimkan langsung ke endpoint tersebut
     final directEndpointId = neighborTable.getEndpointIdForNode(
@@ -205,6 +296,18 @@ class ManetRoutingEngine {
           bytes: forwardedEnvelope.toBytes(),
         );
         _forwardedMessagesController.add(forwardedEnvelope);
+        experimentLogger?.log(
+          envelopeId: forwardedEnvelope.envelopeId,
+          messageId: messageId,
+          senderId: forwardedEnvelope.senderId,
+          recipientId: forwardedEnvelope.recipientId,
+          eventType: MeshExperimentEventType.forwarded,
+          hopCount: forwardedEnvelope.hopCount,
+          routeTrace: forwardedEnvelope.routeTrace,
+          connectionStatus: 'CONNECTED',
+          activeNeighborCount: activeNeighbors.length,
+          outcome: 'FORWARDED_DIRECT_NEIGHBOR',
+        );
         return;
       } catch (e) {
         debugPrint(
@@ -237,9 +340,34 @@ class ManetRoutingEngine {
 
     if (anySent) {
       _forwardedMessagesController.add(forwardedEnvelope);
+      experimentLogger?.log(
+        envelopeId: forwardedEnvelope.envelopeId,
+        messageId: messageId,
+        senderId: forwardedEnvelope.senderId,
+        recipientId: forwardedEnvelope.recipientId,
+        eventType: MeshExperimentEventType.forwarded,
+        hopCount: forwardedEnvelope.hopCount,
+        routeTrace: forwardedEnvelope.routeTrace,
+        connectionStatus: 'CONNECTED',
+        activeNeighborCount: activeNeighbors.length,
+        outcome: 'FORWARDED_FLOODING',
+      );
     } else {
       // Jika tidak ada tetangga lain yang dapat dijangkau, simpan di buffer antrean
       storeAndForwardQueue.enqueue(forwardedEnvelope);
+      experimentLogger?.log(
+        envelopeId: forwardedEnvelope.envelopeId,
+        messageId: messageId,
+        senderId: forwardedEnvelope.senderId,
+        recipientId: forwardedEnvelope.recipientId,
+        eventType: MeshExperimentEventType.queued,
+        hopCount: forwardedEnvelope.hopCount,
+        routeTrace: forwardedEnvelope.routeTrace,
+        connectionStatus: activeNeighbors.isEmpty ? 'DISCONNECTED' : 'PARTIAL',
+        activeNeighborCount: activeNeighbors.length,
+        failureReason: 'NO_ELIGIBLE_NEXT_HOP',
+        outcome: 'STORED_IN_BUFFER',
+      );
     }
   }
 
@@ -338,6 +466,25 @@ class ManetRoutingEngine {
     // Catat ke deduplikasi lokal agar pesan kita sendiri tidak diproses ulang jika terpantul
     dedupCache.add(envelopeId);
 
+    experimentLogger?.log(
+      envelopeId: envelopeId,
+      messageId: messageId,
+      senderId: localNodeId,
+      recipientId: recipientNodeId,
+      eventType: MeshExperimentEventType.created,
+      hopCount: 0,
+      routeTrace: [localNodeId],
+      connectionStatus: neighborTable.activeNeighbors.isNotEmpty
+          ? 'CONNECTED'
+          : 'DISCONNECTED',
+      activeNeighborCount: neighborTable.activeNeighbors.length,
+      outcome: 'CREATED_LOCALLY',
+      syntheticMetadata: {
+        'isEmergency': isEmergency,
+        'hasTelemetry': telemetry != null,
+      },
+    );
+
     // Kirim ke transport
     final bytes = envelope.toBytes();
     final activeNeighbors = neighborTable.activeNeighbors;
@@ -354,7 +501,21 @@ class ManetRoutingEngine {
           endpointId: directEndpointId,
           bytes: bytes,
         );
-        if (ok) sentAnywhere = true;
+        if (ok) {
+          sentAnywhere = true;
+          experimentLogger?.log(
+            envelopeId: envelopeId,
+            messageId: messageId,
+            senderId: localNodeId,
+            recipientId: recipientNodeId,
+            eventType: MeshExperimentEventType.sentToTransport,
+            hopCount: 0,
+            routeTrace: [localNodeId],
+            connectionStatus: 'CONNECTED',
+            activeNeighborCount: activeNeighbors.length,
+            outcome: 'TRANSMITTED_DIRECT',
+          );
+        }
       } catch (_) {}
     } else if (activeNeighbors.isNotEmpty) {
       // Flooding ke seluruh tetangga aktif
@@ -367,11 +528,42 @@ class ManetRoutingEngine {
           if (ok) sentAnywhere = true;
         } catch (_) {}
       }
+      if (sentAnywhere) {
+        experimentLogger?.log(
+          envelopeId: envelopeId,
+          messageId: messageId,
+          senderId: localNodeId,
+          recipientId: recipientNodeId,
+          eventType: MeshExperimentEventType.sentToTransport,
+          hopCount: 0,
+          routeTrace: [localNodeId],
+          connectionStatus: 'CONNECTED',
+          activeNeighborCount: activeNeighbors.length,
+          outcome: 'TRANSMITTED_FLOODING',
+        );
+      }
     }
 
     if (!sentAnywhere) {
       // Tidak ada tetangga aktif yang menerima, simpan ke antrean store-and-forward
       storeAndForwardQueue.enqueue(envelope);
+      experimentLogger?.log(
+        envelopeId: envelopeId,
+        messageId: messageId,
+        senderId: localNodeId,
+        recipientId: recipientNodeId,
+        eventType: MeshExperimentEventType.queued,
+        hopCount: 0,
+        routeTrace: [localNodeId],
+        connectionStatus: activeNeighbors.isEmpty
+            ? 'DISCONNECTED'
+            : 'SEND_FAILED',
+        activeNeighborCount: activeNeighbors.length,
+        failureReason: activeNeighbors.isEmpty
+            ? 'NO_ACTIVE_NEIGHBOR'
+            : 'ALL_SENDS_FAILED',
+        outcome: 'STORED_IN_BUFFER',
+      );
     }
 
     return envelope;
@@ -383,6 +575,18 @@ class ManetRoutingEngine {
       try {
         transport.sendBytes(endpointId: endpointId, bytes: env.toBytes());
         storeAndForwardQueue.remove(env.envelopeId);
+        experimentLogger?.log(
+          envelopeId: env.envelopeId,
+          messageId: env.payload['messageId'] as String? ?? env.envelopeId,
+          senderId: env.senderId,
+          recipientId: env.recipientId,
+          eventType: MeshExperimentEventType.sentToTransport,
+          hopCount: env.hopCount,
+          routeTrace: env.routeTrace,
+          connectionStatus: 'CONNECTED',
+          activeNeighborCount: neighborTable.activeNeighbors.length,
+          outcome: 'QUEUE_FLUSHED_FOR_ENDPOINT',
+        );
       } catch (_) {}
     }
   }
@@ -393,6 +597,18 @@ class ManetRoutingEngine {
       try {
         transport.sendBytes(endpointId: endpointId, bytes: env.toBytes());
         storeAndForwardQueue.remove(env.envelopeId);
+        experimentLogger?.log(
+          envelopeId: env.envelopeId,
+          messageId: env.payload['messageId'] as String? ?? env.envelopeId,
+          senderId: env.senderId,
+          recipientId: env.recipientId,
+          eventType: MeshExperimentEventType.sentToTransport,
+          hopCount: env.hopCount,
+          routeTrace: env.routeTrace,
+          connectionStatus: 'CONNECTED',
+          activeNeighborCount: neighborTable.activeNeighbors.length,
+          outcome: 'QUEUE_FLUSHED_FOR_NODE',
+        );
       } catch (_) {}
     }
   }
