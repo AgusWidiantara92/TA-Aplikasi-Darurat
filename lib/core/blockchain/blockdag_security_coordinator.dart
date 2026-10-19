@@ -60,7 +60,7 @@ enum BlockdagInitStatus {
   /// Belum diinisialisasi.
   uninitialized,
 
-  /// Inisialisasi bersih pertama kali (membuat Genesis block baru).
+  /// Inisialisasi bersih pertama kali (membuat Genesis block baru pada storage kosong).
   freshGenesis,
 
   /// Berhasil memulihkan state rantai DAG dari penyimpanan lokal.
@@ -68,6 +68,15 @@ enum BlockdagInitStatus {
 
   /// Data lokal di disk korup/rusak sehingga jatuh ke fallback inisialisasi Genesis baru.
   corruptedFallbackGenesis,
+
+  /// Penyimpanan lokal tidak dapat diakses atau terjadi kegagalan I/O pada storage.
+  storageUnavailable,
+
+  /// Versi skema tidak didukung; inisialisasi dihentikan agar tidak menimpa data lama.
+  unsupportedVersionHalted,
+
+  /// Pembuatan Genesis awal gagal disimpan ke storage.
+  genesisPersistenceFailed,
 }
 
 /// Koordinator integrasi event keamanan ke BlockDAG ledger lokal.
@@ -128,35 +137,60 @@ class BlockdagSecurityCoordinator {
   /// Inisialisasi koordinator: memulihkan state dari [repository] atau menyimpan genesis jika baru.
   ///
   /// Mengembalikan [BlockdagInitStatus] eksplisit yang membedakan antara:
-  /// - [BlockdagInitStatus.freshGenesis] (penyimpanan pertama kali)
+  /// - [BlockdagInitStatus.freshGenesis] (penyimpanan pertama kali yang sah)
   /// - [BlockdagInitStatus.restoredFromStorage] (pemulihan sukses dari disk)
   /// - [BlockdagInitStatus.corruptedFallbackGenesis] (data disk korup, fallback ke Genesis baru)
+  /// - [BlockdagInitStatus.storageUnavailable] (storage tidak dapat diakses, tidak menimpa data)
+  /// - [BlockdagInitStatus.unsupportedVersionHalted] (versi skema tidak didukung, tidak menimpa data)
+  /// - [BlockdagInitStatus.genesisPersistenceFailed] (penulisan awal Genesis ke storage gagal)
   Future<BlockdagInitStatus> initialize() async {
     if (_isInitialized) return _initStatus;
 
-    final persistedState = await repository.loadState();
-    if (persistedState != null) {
-      ledger.restoreFromPersistedState(persistedState);
-      _initStatus = BlockdagInitStatus.restoredFromStorage;
-    } else {
-      if (repository.lastLoadCorrupted) {
-        _initStatus = BlockdagInitStatus.corruptedFallbackGenesis;
-      } else {
-        _initStatus = BlockdagInitStatus.freshGenesis;
-      }
-      // Penyimpanan baru atau korup: simpan state awal yang memuat Genesis block
-      final initialOk = await _persistLedgerState();
-      if (!initialOk) {
+    final loadResult = await repository.loadResult();
+
+    switch (loadResult.status) {
+      case BlockdagLoadStatus.success:
+        ledger.restoreFromPersistedState(loadResult.state!);
+        _initStatus = BlockdagInitStatus.restoredFromStorage;
+        _isInitialized = true;
+        if (ledger.pendingEventsCount > 0) {
+          _ensureFlushTimer();
+        }
+        return _initStatus;
+
+      case BlockdagLoadStatus.storageUnavailable:
+        // Storage tidak dapat diakses: JANGAN membuat Genesis dan JANGAN menimpa storage!
+        _initStatus = BlockdagInitStatus.storageUnavailable;
         _totalPersistenceFailures++;
-      }
-    }
+        _isInitialized = false; // Memungkinkan retry saat storage pulih
+        return _initStatus;
 
-    if (ledger.pendingEventsCount > 0) {
-      _ensureFlushTimer();
-    }
+      case BlockdagLoadStatus.unsupportedVersion:
+        // Versi skema tidak didukung: JANGAN menimpa data pengguna dengan Genesis baru!
+        _initStatus = BlockdagInitStatus.unsupportedVersionHalted;
+        _isInitialized = false; // Hentikan inisialisasi persisten
+        return _initStatus;
 
-    _isInitialized = true;
-    return _initStatus;
+      case BlockdagLoadStatus.empty:
+      case BlockdagLoadStatus.corruptedData:
+        final isCorrupted =
+            (loadResult.status == BlockdagLoadStatus.corruptedData);
+        // Reset ledger ke Genesis baru
+        ledger.reset();
+
+        final initialOk = await _persistLedgerState();
+        if (initialOk) {
+          _initStatus = isCorrupted
+              ? BlockdagInitStatus.corruptedFallbackGenesis
+              : BlockdagInitStatus.freshGenesis;
+          _isInitialized = true;
+        } else {
+          _initStatus = BlockdagInitStatus.genesisPersistenceFailed;
+          _totalPersistenceFailures++;
+          _isInitialized = false; // Izinkan retry jika penulisan awal gagal
+        }
+        return _initStatus;
+    }
   }
 
   /// Berlangganan langsung pada stream event detektor IDS.

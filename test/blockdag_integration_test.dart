@@ -21,6 +21,7 @@
 /// 18. Instrumentasi metrik dan verifikasi non-interferensi
 library;
 
+import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:siagamesh_app/core/blockchain/blockchain_types.dart';
@@ -41,9 +42,13 @@ import 'package:siagamesh_app/features/chat/data/repositories/chat_repository.da
 /// Fake repository yang sengaja gagal menulis untuk menguji toleransi kesalahan.
 class FailingBlockdagRepository implements BlockdagRepository {
   int saveAttempts = 0;
+  BlockdagLoadResult loadResultStub = BlockdagLoadResult.empty();
 
   @override
-  Future<BlockdagPersistedState?> loadState() async => null;
+  Future<BlockdagLoadResult> loadResult() async => loadResultStub;
+
+  @override
+  Future<BlockdagPersistedState?> loadState() async => loadResultStub.state;
 
   @override
   Future<bool> saveState(BlockdagPersistedState state) async {
@@ -55,7 +60,7 @@ class FailingBlockdagRepository implements BlockdagRepository {
   Future<bool> clear() async => true;
 
   @override
-  bool get lastLoadCorrupted => false;
+  bool get lastLoadCorrupted => loadResultStub.isCorrupted;
 }
 
 void main() {
@@ -1073,6 +1078,400 @@ void main() {
         expect(metrics['averageEventsPerBlock'], equals(2.0));
         expect(metrics['totalPersistenceFailures'], equals(0));
         expect(metrics['estimatedStorageSizeBytes'], greaterThan(0));
+      },
+    );
+  });
+
+  group('STAGE 5E.3.2 — Persistence Initialization & Schema Integrity Hardening', () {
+    test(
+      '19. Instalasi baru dengan storage tersedia menghasilkan freshGenesis',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        final repo = LocalBlockdagRepository();
+        final loadRes = await repo.loadResult();
+        expect(loadRes.status, equals(BlockdagLoadStatus.empty));
+        expect(loadRes.isEmpty, isTrue);
+
+        final ledger = LightweightBlockdagLedger();
+        final coord = BlockdagSecurityCoordinator(
+          localNodeId: 'NODE-A',
+          ledger: ledger,
+          repository: repo,
+        );
+
+        final status = await coord.initialize();
+        expect(status, equals(BlockdagInitStatus.freshGenesis));
+        expect(coord.isInitialized, isTrue);
+        expect(ledger.activeBlocksCount, equals(1)); // Genesis block
+        expect(repo.lastLoadCorrupted, isFalse);
+
+        final secondLoad = await repo.loadResult();
+        expect(secondLoad.status, equals(BlockdagLoadStatus.success));
+        expect(secondLoad.state?.schemaVersion, equals(1));
+      },
+    );
+
+    test(
+      '20. Kegagalan inisialisasi SharedPreferences menghasilkan storageUnavailable',
+      () async {
+        final repo = LocalBlockdagRepository(simulateStorageUnavailable: true);
+        final loadRes = await repo.loadResult();
+        expect(loadRes.status, equals(BlockdagLoadStatus.storageUnavailable));
+        expect(loadRes.isStorageUnavailable, isTrue);
+        expect(repo.lastLoadCorrupted, isFalse);
+
+        final ledger = LightweightBlockdagLedger();
+        final coord = BlockdagSecurityCoordinator(
+          localNodeId: 'NODE-A',
+          ledger: ledger,
+          repository: repo,
+        );
+
+        final status = await coord.initialize();
+        expect(status, equals(BlockdagInitStatus.storageUnavailable));
+        expect(coord.isInitialized, isFalse); // Memungkinkan retry
+        expect(coord.totalPersistenceFailures, equals(1));
+        expect(repo.lastLoadCorrupted, isFalse); // Bukan korupsi data
+      },
+    );
+
+    test(
+      '21. schemaVersion hilang dari JSON ditandai sebagai data korup',
+      () async {
+        SharedPreferences.setMockInitialValues({
+          LocalBlockdagRepository.keyState: jsonEncode({
+            'blocks': [],
+            'checkpoints': [],
+            'tipHashes': [],
+            'processedBlockHashes': [],
+            'processedEventIds': [],
+            'pendingEvents': [],
+            'savedAt': DateTime.now().toUtc().toIso8601String(),
+            // 'schemaVersion' sengaja dihilangkan
+          }),
+          LocalBlockdagRepository.keySchemaVersion: 1,
+        });
+
+        final repo = LocalBlockdagRepository();
+        final loadRes = await repo.loadResult();
+        expect(loadRes.status, equals(BlockdagLoadStatus.corruptedData));
+        expect(loadRes.isCorrupted, isTrue);
+        expect(repo.lastLoadCorrupted, isTrue);
+
+        final ledger = LightweightBlockdagLedger();
+        final coord = BlockdagSecurityCoordinator(
+          localNodeId: 'NODE-A',
+          ledger: ledger,
+          repository: repo,
+        );
+
+        final status = await coord.initialize();
+        expect(status, equals(BlockdagInitStatus.corruptedFallbackGenesis));
+        expect(coord.isInitialized, isTrue);
+        expect(ledger.activeBlocksCount, equals(1));
+      },
+    );
+
+    test(
+      '22. schemaVersion bernilai nol atau negatif ditandai sebagai data korup',
+      () async {
+        SharedPreferences.setMockInitialValues({
+          LocalBlockdagRepository.keyState: jsonEncode({
+            'schemaVersion': 0, // Tidak valid
+            'blocks': [],
+            'checkpoints': [],
+            'tipHashes': [],
+            'processedBlockHashes': [],
+            'processedEventIds': [],
+            'pendingEvents': [],
+            'savedAt': DateTime.now().toUtc().toIso8601String(),
+          }),
+          LocalBlockdagRepository.keySchemaVersion: 0,
+        });
+
+        final repo = LocalBlockdagRepository();
+        final loadRes = await repo.loadResult();
+        expect(loadRes.status, equals(BlockdagLoadStatus.corruptedData));
+        expect(repo.lastLoadCorrupted, isTrue);
+      },
+    );
+
+    test(
+      '23. Ketidakcocokan versi skema antara SharedPreferences dan JSON state ditandai sebagai korup',
+      () async {
+        SharedPreferences.setMockInitialValues({
+          LocalBlockdagRepository.keySchemaVersion:
+              1, // Di prefs tercatat versi 1
+          LocalBlockdagRepository.keyState: jsonEncode({
+            'schemaVersion': 2, // Namun di state tercatat versi 2
+            'blocks': [],
+            'checkpoints': [],
+            'tipHashes': [],
+            'processedBlockHashes': [],
+            'processedEventIds': [],
+            'pendingEvents': [],
+            'savedAt': DateTime.now().toUtc().toIso8601String(),
+          }),
+        });
+
+        final repo = LocalBlockdagRepository();
+        final loadRes = await repo.loadResult();
+        expect(loadRes.status, equals(BlockdagLoadStatus.corruptedData));
+        expect(loadRes.errorMessage, contains('Ketidakcocokan versi skema'));
+        expect(repo.lastLoadCorrupted, isTrue);
+      },
+    );
+
+    test(
+      '24. Versi skema tidak didukung menghentikan inisialisasi tanpa menimpa data',
+      () async {
+        final preservedPayload = jsonEncode({
+          'schemaVersion': 2, // Versi masa depan
+          'blocks': [],
+          'checkpoints': [],
+          'tipHashes': ['tip-future-99'],
+          'processedBlockHashes': [],
+          'processedEventIds': [],
+          'pendingEvents': [],
+          'savedAt': DateTime.now().toUtc().toIso8601String(),
+        });
+
+        SharedPreferences.setMockInitialValues({
+          LocalBlockdagRepository.keySchemaVersion: 2,
+          LocalBlockdagRepository.keyState: preservedPayload,
+        });
+
+        final repo = LocalBlockdagRepository();
+        final loadRes = await repo.loadResult();
+        expect(loadRes.status, equals(BlockdagLoadStatus.unsupportedVersion));
+        expect(loadRes.isUnsupportedVersion, isTrue);
+        expect(loadRes.detectedSchemaVersion, equals(2));
+        expect(repo.lastLoadCorrupted, isFalse);
+
+        final ledger = LightweightBlockdagLedger();
+        final coord = BlockdagSecurityCoordinator(
+          localNodeId: 'NODE-A',
+          ledger: ledger,
+          repository: repo,
+        );
+
+        final status = await coord.initialize();
+        expect(status, equals(BlockdagInitStatus.unsupportedVersionHalted));
+        expect(coord.isInitialized, isFalse);
+
+        // Verifikasi data pada SharedPreferences TIDAK tertimpa oleh Genesis baru
+        final prefs = await SharedPreferences.getInstance();
+        expect(
+          prefs.getString(LocalBlockdagRepository.keyState),
+          equals(preservedPayload),
+        );
+        expect(
+          prefs.getInt(LocalBlockdagRepository.keySchemaVersion),
+          equals(2),
+        );
+      },
+    );
+
+    test(
+      '25. Penulisan Genesis awal gagal menghasilkan genesisPersistenceFailed dan memungkinkan retry',
+      () async {
+        final failingRepo = FailingBlockdagRepository();
+        failingRepo.loadResultStub = BlockdagLoadResult.empty();
+
+        final ledger = LightweightBlockdagLedger();
+        final coord = BlockdagSecurityCoordinator(
+          localNodeId: 'NODE-A',
+          ledger: ledger,
+          repository: failingRepo,
+        );
+
+        final status = await coord.initialize();
+        expect(status, equals(BlockdagInitStatus.genesisPersistenceFailed));
+        expect(coord.isInitialized, isFalse); // Memungkinkan retry
+        expect(coord.totalPersistenceFailures, greaterThan(0));
+      },
+    );
+
+    test(
+      '26. Storage pulih dari pemadaman sementara dan pemulihan berhasil pada retry',
+      () async {
+        final sharedPrefs = await SharedPreferences.getInstance();
+        final repoHealthy = LocalBlockdagRepository(preferences: sharedPrefs);
+        final ledger1 = LightweightBlockdagLedger();
+        final coord1 = BlockdagSecurityCoordinator(
+          localNodeId: 'NODE-A',
+          ledger: ledger1,
+          repository: repoHealthy,
+          config: const BlockdagBatchConfig(maxBatchSize: 1),
+        );
+        await coord1.initialize();
+
+        // Tambahkan 1 blok dengan hash unik
+        await coord1.processIdsDetectionEvent(
+          IdsDetectionEvent(
+            eventId: 'retry-evt-01',
+            runId: 'RUN-1',
+            observerNodeId: 'NODE-A',
+            targetNodeId: 'NODE-B',
+            status: NodeDetectionStatus.suspected,
+            observedDropRate: 0.5,
+            totalExpected: 2,
+            totalClaimed: 1,
+            totalUnconfirmed: 1,
+            totalLinkFailures: 0,
+            totalProtocolDrops: 0,
+            reason: 'Retry test event',
+            timestamp: DateTime.now().toUtc(),
+            monotonicMicros: 1,
+          ),
+        );
+        final savedBlockHash = ledger1.tipHashes.first;
+
+        // Buat repo baru dengan simulasi storage unavailable
+        final dynamicRepo = LocalBlockdagRepository(
+          preferences: sharedPrefs,
+          simulateStorageUnavailable: true,
+        );
+        final ledger2 = LightweightBlockdagLedger();
+        final coord2 = BlockdagSecurityCoordinator(
+          localNodeId: 'NODE-A',
+          ledger: ledger2,
+          repository: dynamicRepo,
+        );
+
+        // Percobaan inisialisasi pertama: Gagal karena storage tidak tersedia
+        final firstAttempt = await coord2.initialize();
+        expect(firstAttempt, equals(BlockdagInitStatus.storageUnavailable));
+        expect(coord2.isInitialized, isFalse);
+
+        // Simulasikan storage kembali tersedia (pulih)
+        dynamicRepo.simulateStorageUnavailable = false;
+
+        // Percobaan inisialisasi kedua (Retry): Berhasil memulihkan state lama
+        final retryAttempt = await coord2.initialize();
+        expect(retryAttempt, equals(BlockdagInitStatus.restoredFromStorage));
+        expect(coord2.isInitialized, isTrue);
+        expect(ledger2.activeBlocksCount, equals(2)); // Genesis + Block 1
+        expect(ledger2.tipHashes, contains(savedBlockHash));
+      },
+    );
+
+    test(
+      '27. State lama tidak tertimpa Genesis selama storage tidak dapat diakses',
+      () async {
+        final sharedPrefs = await SharedPreferences.getInstance();
+        final repo = LocalBlockdagRepository(preferences: sharedPrefs);
+        final ledger = LightweightBlockdagLedger();
+        final coord = BlockdagSecurityCoordinator(
+          localNodeId: 'NODE-A',
+          ledger: ledger,
+          repository: repo,
+          config: const BlockdagBatchConfig(maxBatchSize: 1),
+        );
+        await coord.initialize();
+
+        await coord.processIdsDetectionEvent(
+          IdsDetectionEvent(
+            eventId: 'protected-evt-01',
+            runId: 'RUN-1',
+            observerNodeId: 'NODE-A',
+            targetNodeId: 'NODE-B',
+            status: NodeDetectionStatus.suspected,
+            observedDropRate: 0.5,
+            totalExpected: 2,
+            totalClaimed: 1,
+            totalUnconfirmed: 1,
+            totalLinkFailures: 0,
+            totalProtocolDrops: 0,
+            reason: 'Preserve test',
+            timestamp: DateTime.now().toUtc(),
+            monotonicMicros: 1,
+          ),
+        );
+
+        final stateBeforeOutage = sharedPrefs.getString(
+          LocalBlockdagRepository.keyState,
+        );
+        expect(stateBeforeOutage, isNotNull);
+        expect(stateBeforeOutage, contains('protected-evt-01'));
+
+        // Simulasikan node reboot saat storage error
+        final offlineRepo = LocalBlockdagRepository(
+          preferences: sharedPrefs,
+          simulateStorageUnavailable: true,
+        );
+        final offlineLedger = LightweightBlockdagLedger();
+        final offlineCoord = BlockdagSecurityCoordinator(
+          localNodeId: 'NODE-A',
+          ledger: offlineLedger,
+          repository: offlineRepo,
+        );
+
+        final status = await offlineCoord.initialize();
+        expect(status, equals(BlockdagInitStatus.storageUnavailable));
+
+        // Verifikasi string state di SharedPreferences tetap utuh dan tidak ditimpa
+        final stateAfterFailedInit = sharedPrefs.getString(
+          LocalBlockdagRepository.keyState,
+        );
+        expect(stateAfterFailedInit, equals(stateBeforeOutage));
+      },
+    );
+
+    test(
+      '28. Routing engine MANET tetap beroperasi normal saat ledger mengalami kegagalan inisialisasi',
+      () async {
+        final offlineRepo = LocalBlockdagRepository(
+          simulateStorageUnavailable: true,
+        );
+        final ledger = LightweightBlockdagLedger();
+        final coordinator = BlockdagSecurityCoordinator(
+          localNodeId: 'NODE-A',
+          ledger: ledger,
+          repository: offlineRepo,
+        );
+        final initStatus = await coordinator.initialize();
+        expect(initStatus, equals(BlockdagInitStatus.storageUnavailable));
+
+        // Hubungkan coordinator ke ManetRoutingHolder
+        ManetRoutingHolder.setBlockdagCoordinator(coordinator);
+
+        // Verifikasi routing engine tetap dapat mengirim pesan tanpa terpengaruh kegagalan storage ledger
+        final fakeTransport = FakeMeshTransport();
+        fakeTransport.simulatePeerDiscovered(
+          DiscoveredPeer(
+            endpointId: 'ep-B',
+            endpointName: 'Node B',
+            serviceId: 'siagamesh',
+            discoveredAt: DateTime.now(),
+            status: PeerConnectionStatus.connected,
+          ),
+        );
+        final engine = ManetRoutingEngine(
+          transport: fakeTransport,
+          identityManager: NodeIdentityManager(
+            overrideId: 'NODE-A',
+            overrideName: 'Node A',
+          ),
+          repository: LocalChatRepository(),
+        );
+        engine.neighborTable.mapIdentity(
+          endpointId: 'ep-B',
+          nodeId: 'NODE-B',
+          nodeName: 'Node B',
+        );
+
+        final envelope = await engine.sendChatMessage(
+          recipientNodeId: 'NODE-B',
+          text: 'Pesan darurat berhasil dikirim meski storage ledger offline',
+        );
+
+        expect(envelope, isNotNull);
+        expect(fakeTransport.sentPayloads.length, equals(1));
+
+        engine.dispose();
+        fakeTransport.dispose();
+        coordinator.dispose();
       },
     );
   });

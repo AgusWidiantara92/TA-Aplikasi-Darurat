@@ -742,8 +742,21 @@ class BlockdagPersistedState {
         )
         .toList();
 
+    final rawSchemaVersion = map['schemaVersion'];
+    if (rawSchemaVersion == null) {
+      throw const FormatException(
+        'Field schemaVersion wajib ada pada BlockdagPersistedState',
+      );
+    }
+    final schemaVersion = (rawSchemaVersion as num).toInt();
+    if (schemaVersion <= 0) {
+      throw FormatException(
+        'Field schemaVersion harus bernilai bilangan bulat positif, ditemukan: $schemaVersion',
+      );
+    }
+
     return BlockdagPersistedState(
-      schemaVersion: (map['schemaVersion'] as num?)?.toInt() ?? 1,
+      schemaVersion: schemaVersion,
       blocks: blocks,
       checkpoints: checkpoints,
       tipHashes: List<String>.from(map['tipHashes'] as List? ?? []),
