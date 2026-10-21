@@ -303,11 +303,21 @@ class SelectiveForwardingDetector {
     evaluateNode(peerNodeId);
   }
 
+  Timer? _timeoutTimer;
+
+  /// Status apakah pemindaian batas waktu berkala sedang berjalan aktif.
+  bool get isPeriodicTimeoutCheckRunning =>
+      _timeoutTimer != null && _timeoutTimer!.isActive;
+
   /// 5. Memeriksa timeout untuk seluruh kewajiban penerusan yang tertunda.
   ///
   /// Jika batas waktu `config.ackTimeout` terlampaui dan link masih aktif,
   /// paket ditandai sebagai `forwardingUnconfirmed` dan memicu evaluasi status.
-  void checkTimeouts({DateTime? now, bool isLinkConnected = true}) {
+  void checkTimeouts({
+    DateTime? now,
+    bool isLinkConnected = true,
+    bool Function(String peerNodeId)? isPeerConnected,
+  }) {
     final currentTime = now ?? DateTime.now();
     final expiredKeys = <String>[];
 
@@ -320,7 +330,10 @@ class SelectiveForwardingDetector {
         ob.isResolved = true;
 
         final stats = _getOrCreateStats(ob.peerNodeId);
-        if (isLinkConnected) {
+        final bool connected = isPeerConnected != null
+            ? isPeerConnected(ob.peerNodeId)
+            : isLinkConnected;
+        if (connected) {
           ob.evidenceType = ForwardingEvidenceType.forwardingUnconfirmed;
           stats.unconfirmedCount++;
         } else {
@@ -336,6 +349,23 @@ class SelectiveForwardingDetector {
         evaluateNode(ob.peerNodeId);
       }
     }
+  }
+
+  /// Memulai evaluasi batas waktu (timeout) forwarding secara periodik.
+  void startPeriodicTimeoutCheck({
+    Duration interval = const Duration(milliseconds: 1000),
+    bool Function(String peerNodeId)? isPeerConnected,
+  }) {
+    stopPeriodicTimeoutCheck();
+    _timeoutTimer = Timer.periodic(interval, (_) {
+      checkTimeouts(isPeerConnected: isPeerConnected);
+    });
+  }
+
+  /// Menghentikan evaluasi batas waktu periodik.
+  void stopPeriodicTimeoutCheck() {
+    _timeoutTimer?.cancel();
+    _timeoutTimer = null;
   }
 
   /// 6. Evaluasi klasifikasi status node berdasarkan bukti terakumulasi.
@@ -459,6 +489,7 @@ class SelectiveForwardingDetector {
   }
 
   void dispose() {
+    stopPeriodicTimeoutCheck();
     _detectionEventsController.close();
   }
 }

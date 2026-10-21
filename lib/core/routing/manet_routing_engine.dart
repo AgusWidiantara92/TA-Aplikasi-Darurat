@@ -5,8 +5,10 @@ import 'package:flutter/foundation.dart';
 import '../../features/chat/data/repositories/chat_repository.dart';
 import '../../features/chat/models/chat_message.dart';
 import '../transport/mesh_transport.dart';
+import '../ids/ids_types.dart';
 import '../ids/selective_forwarding_detector.dart';
 import '../trust/dynamic_trust_manager.dart';
+import '../blockchain/blockdag_security_coordinator.dart';
 import '../blockchain/gossip/gossip.dart';
 import 'deduplication_cache.dart';
 import 'mesh_experiment_logger.dart';
@@ -33,12 +35,15 @@ class ManetRoutingEngine {
   final MeshExperimentLogger? experimentLogger;
   final SelectiveForwardingDetector? idsDetector;
   final DynamicTrustManager? trustManager;
+  final BlockdagSecurityCoordinator? blockdagCoordinator;
   final bool enableHopAck;
   final bool enableTrustRoutingPolicy;
+  final bool autoStartIdsTimeoutTimer;
   DagGossipSyncEngine? gossipSyncEngine;
 
   StreamSubscription<TransportConnectionEvent>? _eventsSub;
   StreamSubscription<TransportPayload>? _payloadSub;
+  StreamSubscription<IdsDetectionEvent>? _idsToTrustSub;
 
   final StreamController<MessageEnvelope> _incomingMessagesController =
       StreamController<MessageEnvelope>.broadcast();
@@ -55,8 +60,10 @@ class ManetRoutingEngine {
     this.experimentLogger,
     this.idsDetector,
     this.trustManager,
+    this.blockdagCoordinator,
     this.enableHopAck = false,
     this.enableTrustRoutingPolicy = false,
+    this.autoStartIdsTimeoutTimer = false,
     this.gossipSyncEngine,
   }) : neighborTable = neighborTable ?? NeighborTable(),
        dedupCache = dedupCache ?? DeduplicationCache(),
@@ -68,9 +75,16 @@ class ManetRoutingEngine {
       trustManager!.experimentLogger ??= experimentLogger;
     }
     if (idsDetector != null && trustManager != null) {
-      idsDetector!.detectionEventsStream.listen((event) {
+      _idsToTrustSub = idsDetector!.detectionEventsStream.listen((event) {
         trustManager!.observeIdsEvent(event);
       });
+    }
+    if (idsDetector != null && autoStartIdsTimeoutTimer) {
+      idsDetector!.startPeriodicTimeoutCheck(
+        interval: const Duration(milliseconds: 1000),
+        isPeerConnected: (peerId) =>
+            this.neighborTable.activeNeighbors.any((p) => p.nodeId == peerId),
+      );
     }
     _initListeners();
   }
@@ -111,13 +125,16 @@ class ManetRoutingEngine {
         event.status == PeerConnectionStatus.rejected) {
       final peer = neighborTable.getPeerByEndpoint(event.endpointId);
       final peerNodeId = peer?.nodeId;
-      if (peerNodeId != null && !peerNodeId.startsWith('pending-')) {
-        idsDetector?.registerLinkFailure(
-          peerNodeId: peerNodeId,
-          reason: 'TRANSPORT_LINK_DISCONNECTED',
-        );
-      }
       neighborTable.markDisconnected(event.endpointId);
+      if (peerNodeId != null && !peerNodeId.startsWith('pending-')) {
+        // Hanya daftarkan link failure jika node tidak lagi memiliki endpoint aktif lain
+        if (!neighborTable.isNodeConnected(peerNodeId)) {
+          idsDetector?.registerLinkFailure(
+            peerNodeId: peerNodeId,
+            reason: 'TRANSPORT_LINK_DISCONNECTED',
+          );
+        }
+      }
     }
   }
 
@@ -143,6 +160,14 @@ class ManetRoutingEngine {
       );
     } catch (e) {
       debugPrint('[RoutingEngine] Gagal mengirim handshake: $e');
+    }
+  }
+
+  /// Mengumumkan kehadiran dan identitas (handshake) terbaru ke seluruh tetangga aktif.
+  Future<void> announcePresence() async {
+    final active = neighborTable.activeNeighbors;
+    for (final neighbor in active) {
+      await _sendHandshake(neighbor.endpointId);
     }
   }
 
@@ -205,6 +230,24 @@ class ManetRoutingEngine {
     );
   }
 
+  void _logDiag({
+    required String stage,
+    required String msgId,
+    required String type,
+    required String sender,
+    required String dest,
+    String? endpoint,
+    String? outcome,
+    String? reason,
+  }) {
+    debugPrint(
+      '[SiagaMesh-Diag] Stage=$stage | msgId=$msgId | type=$type | sender=$sender | dest=$dest | localNode=$localNodeId'
+      '${endpoint != null ? ' | ep=$endpoint' : ''}'
+      '${outcome != null ? ' | outcome=$outcome' : ''}'
+      '${reason != null ? ' | reason=$reason' : ''}',
+    );
+  }
+
   Future<void> _processIncomingEnvelope(
     MessageEnvelope envelope,
     TransportPayload payload,
@@ -222,6 +265,51 @@ class ManetRoutingEngine {
         nodeName: remoteNodeName,
       );
 
+      _logDiag(
+        stage: 'HANDSHAKE_MAPPED',
+        msgId: envelope.envelopeId,
+        type: 'HANDSHAKE',
+        sender: remoteNodeId,
+        dest: localNodeId,
+        endpoint: payload.endpointId,
+        outcome: 'IDENTITY_MAPPED',
+      );
+
+      // Sinkronkan ke ChatRepository lokal jika percakapan sudah ada atau terdapat percakapan sementara yang perlu dimigrasikan
+      if (repository != null) {
+        try {
+          final existing = await repository!.getConversations();
+          final cleanRemoteId = remoteNodeId
+              .replaceFirst(RegExp(r'^Node:\s*#?', caseSensitive: false), '')
+              .trim()
+              .toLowerCase();
+          final hasExistingOrTemp = existing.any((c) {
+            final pId = (c.peerNodeId ?? '').toLowerCase();
+            return pId == cleanRemoteId ||
+                pId == 'peer-${payload.endpointId.toLowerCase()}' ||
+                pId == 'pending-${payload.endpointId.toLowerCase()}' ||
+                c.id.toLowerCase() == 'conv-node-$cleanRemoteId';
+          });
+          if (hasExistingOrTemp) {
+            if (repository is LocalChatRepository) {
+              await (repository as LocalChatRepository)
+                  .getOrCreateConversationForNode(
+                    nodeId: remoteNodeId,
+                    nodeName: remoteNodeName,
+                    isConnected: true,
+                    endpointId: payload.endpointId,
+                  );
+            } else {
+              await repository!.getOrCreateConversationForNode(
+                nodeId: remoteNodeId,
+                nodeName: remoteNodeName,
+                isConnected: true,
+              );
+            }
+          }
+        } catch (_) {}
+      }
+
       // Setelah identitas node terpetakan, coba flush antrean store-and-forward
       _flushQueueForNode(remoteNodeId, payload.endpointId);
       return;
@@ -237,6 +325,16 @@ class ManetRoutingEngine {
               envelopeId: ackedEnvelopeId,
             ) ??
             false;
+
+        _logDiag(
+          stage: 'RECEIVED_HOP_ACK',
+          msgId: ackedEnvelopeId,
+          type: 'HOP_ACK',
+          sender: envelope.senderId,
+          dest: localNodeId,
+          endpoint: payload.endpointId,
+          outcome: registered ? 'HOP_ACK_MATCHED' : 'HOP_ACK_UNMATCHED',
+        );
 
         experimentLogger?.log(
           envelopeId: envelope.envelopeId,
@@ -258,6 +356,64 @@ class ManetRoutingEngine {
         );
       }
       return;
+    }
+
+    // 2b. Tangani Konfirmasi Pengiriman Akhir (E2E_ACK)
+    if (envelope.type == MessageEnvelope.typeE2eAck) {
+      final isForMe =
+          envelope.recipientId.trim().toLowerCase() ==
+          localNodeId.trim().toLowerCase();
+      final ackedEnvelopeId = envelope.payload['ackedEnvelopeId'] as String?;
+      final ackedMessageId = envelope.payload['ackedMessageId'] as String?;
+
+      if (isForMe) {
+        _logDiag(
+          stage: 'CONFIRMED_E2E_ACK',
+          msgId: ackedMessageId ?? ackedEnvelopeId ?? envelope.envelopeId,
+          type: 'E2E_ACK',
+          sender: envelope.senderId,
+          dest: localNodeId,
+          endpoint: payload.endpointId,
+          outcome: 'DELIVERY_CONFIRMED_BY_DESTINATION',
+        );
+
+        // Catat bukti penerimaan akhir terkonfirmasi ke DynamicTrustManager
+        trustManager?.observeDirectEvidence(
+          targetNodeId: envelope.senderId,
+          evidenceType: ForwardingEvidenceType.deliveryConfirmed,
+          evidenceId: envelope.envelopeId,
+        );
+
+        // Emisi event agar UI obrolan dapat memperbarui status centang / penerimaan
+        _incomingMessagesController.add(envelope);
+
+        // Perbarui status penyimpanan di repository jika tersedia
+        if (repository != null && ackedMessageId != null) {
+          final convId = 'conv-node-${envelope.senderId}';
+          try {
+            await repository!.updateMessageStatus(
+              convId,
+              ackedMessageId,
+              'Diterima di Perangkat Tujuan (E2E ACK)',
+            );
+          } catch (_) {}
+        }
+        return;
+      } else if (envelope.ttl > 1) {
+        _logDiag(
+          stage: 'RELAY_E2E_ACK',
+          msgId: ackedMessageId ?? envelope.envelopeId,
+          type: 'E2E_ACK',
+          sender: envelope.senderId,
+          dest: envelope.recipientId,
+          outcome: 'FORWARDING_ACK',
+        );
+        await _forwardToOtherNeighbors(
+          envelope: envelope,
+          sourceEndpointId: payload.endpointId,
+        );
+        return;
+      }
     }
 
     // 3. Tangani Pesan Obrolan (CHAT_MESSAGE)
@@ -338,13 +494,43 @@ class ManetRoutingEngine {
       }
 
       // Aturan D: Penentuan Tujuan
-      final isForMe = envelope.recipientId == localNodeId;
-      final isBroadcast = envelope.recipientId == 'BROADCAST';
+      final isBroadcast =
+          envelope.recipientId.trim().toUpperCase() == 'BROADCAST';
+      final isForMe =
+          !isBroadcast &&
+          (envelope.recipientId.trim().toLowerCase() ==
+                  localNodeId.trim().toLowerCase() ||
+              envelope.recipientId.trim().toLowerCase() ==
+                  payload.endpointId.toLowerCase() ||
+              neighborTable
+                      .getNodeIdForEndpoint(payload.endpointId)
+                      ?.toLowerCase() ==
+                  envelope.recipientId.trim().toLowerCase());
 
       if (isForMe || isBroadcast) {
         // Node ini adalah penerima tujuan akhir
         await _deliverToLocalApp(envelope, isBroadcast: isBroadcast);
         _incomingMessagesController.add(envelope);
+
+        _logDiag(
+          stage: 'DELIVERED_TO_APP',
+          msgId: messageId,
+          type: isBroadcast ? 'BROADCAST' : 'PERSONAL',
+          sender: envelope.senderId,
+          dest: envelope.recipientId,
+          endpoint: payload.endpointId,
+          outcome: 'DELIVERED_TO_APP',
+        );
+
+        // Jika pesan personal (1-to-1), kirim konfirmasi penerimaan akhir (E2E_ACK)
+        if (!isBroadcast) {
+          _sendE2eAck(
+            targetNodeId: envelope.senderId,
+            ackedEnvelopeId: envelope.envelopeId,
+            ackedMessageId: messageId,
+            directEndpointId: payload.endpointId,
+          );
+        }
 
         experimentLogger?.log(
           envelopeId: envelope.envelopeId,
@@ -373,6 +559,16 @@ class ManetRoutingEngine {
       } else {
         // Node ini HANYA PERANTARA (Relay Node)!
         // Wajib: Jangan mencampur pesan dengan percakapan lokal node perantara
+        _logDiag(
+          stage: 'RELAY_TRANSIT',
+          msgId: messageId,
+          type: 'PERSONAL',
+          sender: envelope.senderId,
+          dest: envelope.recipientId,
+          endpoint: payload.endpointId,
+          outcome: 'RELAY_TRANSIT',
+        );
+
         experimentLogger?.log(
           envelopeId: envelope.envelopeId,
           messageId: messageId,
@@ -484,6 +680,17 @@ class ManetRoutingEngine {
             outcome: decision,
             syntheticMetadata: {'trustScore': score, 'decision': decision},
           );
+          if (decision == 'BLOCKED_UNTRUSTED_RELAY' &&
+              blockdagCoordinator != null) {
+            blockdagCoordinator!.recordIsolationDecision(
+              eventId: 'iso-$peerId-${forwardedEnvelope.envelopeId}',
+              targetNodeId: peerId,
+              action: 'isolate',
+              score: score,
+              reason:
+                  'Untrusted relay blocked from forwarding envelope ${forwardedEnvelope.envelopeId}',
+            );
+          }
         },
       );
     }
@@ -574,12 +781,65 @@ class ManetRoutingEngine {
     } catch (_) {}
   }
 
+  /// Mengirimkan konfirmasi penerimaan akhir (End-to-End Delivery ACK) langsung
+  /// dari node tujuan menuju node pengirim awal pesan.
+  void _sendE2eAck({
+    required String targetNodeId,
+    required String ackedEnvelopeId,
+    required String ackedMessageId,
+    String? directEndpointId,
+  }) async {
+    final e2eAck = MessageEnvelope(
+      envelopeId: 'e2e-ack-$ackedEnvelopeId-$localNodeId',
+      type: MessageEnvelope.typeE2eAck,
+      senderId: localNodeId,
+      senderName: localNodeName,
+      recipientId: targetNodeId,
+      createdAt: DateTime.now().millisecondsSinceEpoch,
+      ttl: MessageEnvelope.defaultTtl,
+      hopCount: 0,
+      routeTrace: [localNodeId],
+      payload: {
+        'ackedEnvelopeId': ackedEnvelopeId,
+        'ackedMessageId': ackedMessageId,
+        'status': 'DELIVERED_TO_DESTINATION',
+      },
+    );
+
+    _logDiag(
+      stage: 'SEND_E2E_ACK',
+      msgId: ackedMessageId,
+      type: 'E2E_ACK',
+      sender: localNodeId,
+      dest: targetNodeId,
+      endpoint: directEndpointId,
+      outcome: 'E2E_ACK_SENT',
+    );
+
+    final epId =
+        directEndpointId ?? neighborTable.getEndpointIdForNode(targetNodeId);
+    if (epId != null) {
+      try {
+        await transport.sendBytes(endpointId: epId, bytes: e2eAck.toBytes());
+      } catch (_) {}
+    } else {
+      for (final neighbor in neighborTable.activeNeighbors) {
+        try {
+          await transport.sendBytes(
+            endpointId: neighbor.endpointId,
+            bytes: e2eAck.toBytes(),
+          );
+        } catch (_) {}
+      }
+    }
+  }
+
   /// Menyampaikan pesan yang ditujukan untuk node ini ke ChatRepository lokal.
   Future<void> _deliverToLocalApp(
     MessageEnvelope envelope, {
     required bool isBroadcast,
   }) async {
-    if (repository == null) return;
+    final repo = repository ?? ChatRepositoryHolder.instance;
 
     final messageId =
         envelope.payload['messageId'] as String? ?? envelope.envelopeId;
@@ -618,15 +878,31 @@ class ManetRoutingEngine {
     );
 
     if (isBroadcast) {
-      await repository!.saveMessage('broadcast-all', chatMessage);
+      await repo.saveMessage('broadcast-all', chatMessage);
+      _logDiag(
+        stage: 'DELIVERED_TO_APP_REPO',
+        msgId: messageId,
+        type: 'BROADCAST',
+        sender: envelope.senderId,
+        dest: 'BROADCAST',
+        outcome: 'SAVED_TO_BROADCAST_CONV',
+      );
     } else {
-      final conv = await repository!.getOrCreateConversationForNode(
+      final conv = await repo.getOrCreateConversationForNode(
         nodeId: envelope.senderId,
         nodeName: envelope.senderName,
         isEmergency: isEmergency,
         isConnected: true,
       );
-      await repository!.saveMessage(conv.id, chatMessage);
+      await repo.saveMessage(conv.id, chatMessage);
+      _logDiag(
+        stage: 'DELIVERED_TO_APP_REPO',
+        msgId: messageId,
+        type: 'PERSONAL',
+        sender: envelope.senderId,
+        dest: localNodeId,
+        outcome: 'SAVED_TO_PERSONAL_CONV',
+      );
     }
   }
 
@@ -647,12 +923,34 @@ class ManetRoutingEngine {
         'env-${now.millisecondsSinceEpoch}-$localNodeId-$randomSuffix';
     final messageId = 'msg-${now.millisecondsSinceEpoch}-$randomSuffix';
 
+    // Normalisasi & resolusi recipientNodeId yang aman dan akurat
+    String cleanRecipient = recipientNodeId
+        .replaceFirst(RegExp(r'^Node:\s*#?', caseSensitive: false), '')
+        .trim();
+
+    // Resolusi jika cleanRecipient berawalan 'peer-' atau merupakan endpoint ID
+    if (cleanRecipient.startsWith('peer-')) {
+      final subEp = cleanRecipient.substring(5);
+      final mapped = neighborTable.getNodeIdForEndpoint(subEp);
+      if (mapped != null && !mapped.startsWith('pending-')) {
+        cleanRecipient = mapped;
+      }
+    } else if (neighborTable.getNodeIdForEndpoint(cleanRecipient) != null) {
+      final mapped = neighborTable.getNodeIdForEndpoint(cleanRecipient);
+      if (mapped != null && !mapped.startsWith('pending-')) {
+        cleanRecipient = mapped;
+      }
+    }
+
+    final isBroadcast = cleanRecipient.toUpperCase() == 'BROADCAST';
+    final canonicalRecipientId = isBroadcast ? 'BROADCAST' : cleanRecipient;
+
     final envelope = MessageEnvelope(
       envelopeId: envelopeId,
       type: MessageEnvelope.typeChat,
       senderId: localNodeId,
       senderName: localNodeName,
-      recipientId: recipientNodeId,
+      recipientId: canonicalRecipientId,
       createdAt: now.millisecondsSinceEpoch,
       ttl: MessageEnvelope.defaultTtl,
       hopCount: 0,
@@ -669,11 +967,20 @@ class ManetRoutingEngine {
     // Catat ke deduplikasi lokal agar pesan kita sendiri tidak diproses ulang jika terpantul
     dedupCache.add(envelopeId);
 
+    _logDiag(
+      stage: 'CREATED',
+      msgId: messageId,
+      type: isBroadcast ? 'BROADCAST' : 'PERSONAL',
+      sender: localNodeId,
+      dest: canonicalRecipientId,
+      outcome: 'CREATED_LOCALLY',
+    );
+
     experimentLogger?.log(
       envelopeId: envelopeId,
       messageId: messageId,
       senderId: localNodeId,
-      recipientId: recipientNodeId,
+      recipientId: canonicalRecipientId,
       eventType: MeshExperimentEventType.created,
       hopCount: 0,
       routeTrace: [localNodeId],
@@ -694,10 +1001,12 @@ class ManetRoutingEngine {
 
     bool sentAnywhere = false;
 
-    // Jika tujuan langsung terhubung
-    final directEndpointId = neighborTable.getEndpointIdForNode(
-      recipientNodeId,
-    );
+    // Jika tujuan langsung terhubung (1-hop langsung)
+    final directEndpointId = isBroadcast
+        ? null
+        : (neighborTable.getEndpointIdForNode(canonicalRecipientId) ??
+              neighborTable.getEndpointIdForNode(cleanRecipient));
+
     if (directEndpointId != null) {
       try {
         final ok = await transport.sendBytes(
@@ -706,11 +1015,20 @@ class ManetRoutingEngine {
         );
         if (ok) {
           sentAnywhere = true;
+          _logDiag(
+            stage: 'SENT_TO_TRANSPORT',
+            msgId: messageId,
+            type: 'PERSONAL',
+            sender: localNodeId,
+            dest: canonicalRecipientId,
+            endpoint: directEndpointId,
+            outcome: 'TRANSMITTED_DIRECT',
+          );
           experimentLogger?.log(
             envelopeId: envelopeId,
             messageId: messageId,
             senderId: localNodeId,
-            recipientId: recipientNodeId,
+            recipientId: canonicalRecipientId,
             eventType: MeshExperimentEventType.sentToTransport,
             hopCount: 0,
             routeTrace: [localNodeId],
@@ -726,7 +1044,7 @@ class ManetRoutingEngine {
         targetNeighbors = trustManager!.filterForwardingPeers<NeighborPeer>(
           peers: activeNeighbors,
           getNodeId: (n) => n.nodeId,
-          destinationId: recipientNodeId,
+          destinationId: canonicalRecipientId,
           onDecision: (peerId, decision, score) {
             experimentLogger?.log(
               envelopeId: envelopeId,
@@ -741,11 +1059,21 @@ class ManetRoutingEngine {
               outcome: decision,
               syntheticMetadata: {'trustScore': score, 'decision': decision},
             );
+            if (decision == 'BLOCKED_UNTRUSTED_RELAY' &&
+                blockdagCoordinator != null) {
+              blockdagCoordinator!.recordIsolationDecision(
+                eventId: 'iso-$peerId-$envelopeId',
+                targetNodeId: peerId,
+                action: 'isolate',
+                score: score,
+                reason: 'Untrusted relay blocked from initial broadcast/relay',
+              );
+            }
           },
         );
       }
 
-      // Flooding ke seluruh tetangga yang memenuhi syarat kebijakan
+      // Flooding/Forwarding ke tetangga yang memenuhi syarat kebijakan
       for (final neighbor in targetNeighbors) {
         try {
           final ok = await transport.sendBytes(
@@ -756,11 +1084,19 @@ class ManetRoutingEngine {
         } catch (_) {}
       }
       if (sentAnywhere) {
+        _logDiag(
+          stage: 'SENT_TO_TRANSPORT',
+          msgId: messageId,
+          type: isBroadcast ? 'BROADCAST' : 'PERSONAL',
+          sender: localNodeId,
+          dest: canonicalRecipientId,
+          outcome: 'TRANSMITTED_FLOODING',
+        );
         experimentLogger?.log(
           envelopeId: envelopeId,
           messageId: messageId,
           senderId: localNodeId,
-          recipientId: recipientNodeId,
+          recipientId: canonicalRecipientId,
           eventType: MeshExperimentEventType.sentToTransport,
           hopCount: 0,
           routeTrace: [localNodeId],
@@ -771,7 +1107,7 @@ class ManetRoutingEngine {
 
         if (idsDetector != null && envelope.ttl > 1) {
           for (final neighbor in targetNeighbors) {
-            if (neighbor.nodeId != recipientNodeId) {
+            if (neighbor.nodeId != canonicalRecipientId) {
               idsDetector?.registerForwardingExpected(
                 peerNodeId: neighbor.nodeId,
                 envelopeId: envelope.envelopeId,
@@ -785,11 +1121,22 @@ class ManetRoutingEngine {
     if (!sentAnywhere) {
       // Tidak ada tetangga aktif yang menerima, simpan ke antrean store-and-forward
       storeAndForwardQueue.enqueue(envelope);
+      _logDiag(
+        stage: 'QUEUED',
+        msgId: messageId,
+        type: isBroadcast ? 'BROADCAST' : 'PERSONAL',
+        sender: localNodeId,
+        dest: canonicalRecipientId,
+        outcome: 'STORED_IN_BUFFER',
+        reason: activeNeighbors.isEmpty
+            ? 'NO_ACTIVE_NEIGHBOR'
+            : 'ALL_SENDS_FAILED',
+      );
       experimentLogger?.log(
         envelopeId: envelopeId,
         messageId: messageId,
         senderId: localNodeId,
-        recipientId: recipientNodeId,
+        recipientId: canonicalRecipientId,
         eventType: MeshExperimentEventType.queued,
         hopCount: 0,
         routeTrace: [localNodeId],
@@ -887,6 +1234,9 @@ class ManetRoutingEngine {
   void dispose() {
     _eventsSub?.cancel();
     _payloadSub?.cancel();
+    _idsToTrustSub?.cancel();
+    _idsToTrustSub = null;
+    idsDetector?.stopPeriodicTimeoutCheck();
     _incomingMessagesController.close();
     _forwardedMessagesController.close();
     gossipSyncEngine?.dispose();

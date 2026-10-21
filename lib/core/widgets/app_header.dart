@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../features/profile/presentation/profile_screen.dart';
 import '../constants/app_colors.dart';
 import 'status_badge.dart';
 
@@ -49,10 +50,10 @@ class AppHeader extends StatelessWidget {
             onTap:
                 onProfileTap ??
                 () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Profil Pengguna SiagaMesh'),
-                      duration: Duration(seconds: 1),
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => const ProfileScreen(),
                     ),
                   );
                 },

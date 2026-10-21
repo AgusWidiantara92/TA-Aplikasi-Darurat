@@ -126,7 +126,7 @@ class ControllableFakeMeshTransport extends FakeMeshTransport {
   }
 }
 
-class FakeChatRepository implements ChatRepository {
+class FakeChatRepository extends ChatRepository {
   final List<ChatMessage> savedMessages = [];
 
   @override
@@ -181,6 +181,13 @@ class FakeChatRepository implements ChatRepository {
     savedMessages.removeWhere((m) => m.id == messageId);
     return savedMessages.length < initialCount;
   }
+
+  @override
+  Future<bool> updateMessageStatus(
+    String conversationId,
+    String messageId,
+    String newStatusText,
+  ) async => true;
 
   @override
   Future<void> clearAllData() async {

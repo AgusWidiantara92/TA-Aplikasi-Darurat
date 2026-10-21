@@ -15,6 +15,7 @@ class ChatConversation {
   final String? statusLabel;
   final bool isEmergency;
   final bool isConnectedNode;
+  final int? lastActivityTimestamp;
 
   const ChatConversation({
     required this.id,
@@ -30,6 +31,7 @@ class ChatConversation {
     this.statusLabel,
     this.isEmergency = false,
     this.isConnectedNode = true,
+    this.lastActivityTimestamp,
   });
 
   ChatConversation copyWith({
@@ -46,6 +48,7 @@ class ChatConversation {
     String? statusLabel,
     bool? isEmergency,
     bool? isConnectedNode,
+    int? lastActivityTimestamp,
   }) {
     return ChatConversation(
       id: id ?? this.id,
@@ -61,6 +64,8 @@ class ChatConversation {
       statusLabel: statusLabel ?? this.statusLabel,
       isEmergency: isEmergency ?? this.isEmergency,
       isConnectedNode: isConnectedNode ?? this.isConnectedNode,
+      lastActivityTimestamp:
+          lastActivityTimestamp ?? this.lastActivityTimestamp,
     );
   }
 
@@ -78,6 +83,7 @@ class ChatConversation {
     'statusLabel': statusLabel,
     'isEmergency': isEmergency,
     'isConnectedNode': isConnectedNode,
+    'lastActivityTimestamp': lastActivityTimestamp,
   };
 
   factory ChatConversation.fromJson(Map<String, dynamic> json) {
@@ -95,6 +101,7 @@ class ChatConversation {
       statusLabel: json['statusLabel'] as String?,
       isEmergency: json['isEmergency'] as bool? ?? false,
       isConnectedNode: json['isConnectedNode'] as bool? ?? true,
+      lastActivityTimestamp: json['lastActivityTimestamp'] as int?,
     );
   }
 }

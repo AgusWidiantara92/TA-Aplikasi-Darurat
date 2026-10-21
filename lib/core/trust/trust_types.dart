@@ -197,6 +197,59 @@ class TrustRecord {
     _processedIds.clear();
     lastUpdated = DateTime.now();
   }
+
+  Map<String, dynamic> toMap() => {
+    'nodeId': nodeId,
+    'currentScore': currentScore,
+    'totalObservations': totalObservations,
+    'positiveEvidenceSum': positiveEvidenceSum,
+    'negativeEvidenceSum': negativeEvidenceSum,
+    'linkFailureCount': linkFailureCount,
+    'protocolDropCount': protocolDropCount,
+    'relayClaimCount': relayClaimCount,
+    'downstreamConfirmedCount': downstreamConfirmedCount,
+    'deliveryConfirmedCount': deliveryConfirmedCount,
+    'unconfirmedDropCount': unconfirmedDropCount,
+    'lastUpdatedIso': lastUpdated.toUtc().toIso8601String(),
+    'processedIds': _processedIds.toList(),
+  };
+
+  factory TrustRecord.fromMap(Map<String, dynamic> map) {
+    final rawScore = (map['currentScore'] as num?)?.toDouble() ?? 0.60;
+    final clampedScore = rawScore.isNaN || rawScore.isInfinite
+        ? 0.60
+        : rawScore.clamp(0.0, 1.0);
+
+    final record = TrustRecord(
+      nodeId: map['nodeId'] as String,
+      currentScore: clampedScore,
+      totalObservations: (map['totalObservations'] as num?)?.toInt() ?? 0,
+      positiveEvidenceSum:
+          (map['positiveEvidenceSum'] as num?)?.toDouble() ?? 0.0,
+      negativeEvidenceSum:
+          (map['negativeEvidenceSum'] as num?)?.toDouble() ?? 0.0,
+      linkFailureCount: (map['linkFailureCount'] as num?)?.toInt() ?? 0,
+      protocolDropCount: (map['protocolDropCount'] as num?)?.toInt() ?? 0,
+      relayClaimCount: (map['relayClaimCount'] as num?)?.toInt() ?? 0,
+      downstreamConfirmedCount:
+          (map['downstreamConfirmedCount'] as num?)?.toInt() ?? 0,
+      deliveryConfirmedCount:
+          (map['deliveryConfirmedCount'] as num?)?.toInt() ?? 0,
+      unconfirmedDropCount: (map['unconfirmedDropCount'] as num?)?.toInt() ?? 0,
+      lastUpdated: map['lastUpdatedIso'] != null
+          ? DateTime.tryParse(map['lastUpdatedIso'] as String)?.toUtc() ??
+                DateTime.now().toUtc()
+          : DateTime.now().toUtc(),
+    );
+
+    final processed = map['processedIds'] as List? ?? [];
+    for (final id in processed) {
+      if (id != null) {
+        record.markProcessed(id.toString());
+      }
+    }
+    return record;
+  }
 }
 
 /// Representasi data peristiwa pembaruan skor kepercayaan (*Trust Score Change Event*).

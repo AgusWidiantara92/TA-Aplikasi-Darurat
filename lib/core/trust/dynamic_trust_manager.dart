@@ -1,6 +1,7 @@
 import 'dart:async';
 import '../ids/ids_types.dart';
 import '../routing/mesh_experiment_logger.dart';
+import 'trust_repository.dart';
 import 'trust_types.dart';
 
 /// Mesin pengelola reputasi dinamis (*Dynamic Trust Management Engine*) SiagaMesh.
@@ -15,6 +16,7 @@ import 'trust_types.dart';
 class DynamicTrustManager {
   final String localNodeId;
   final TrustConfig config;
+  final TrustRepository? repository;
   MeshExperimentLogger? experimentLogger;
   String? simulationGroundTruth;
   final Stopwatch _stopwatch = Stopwatch()..start();
@@ -30,6 +32,7 @@ class DynamicTrustManager {
   DynamicTrustManager({
     required this.localNodeId,
     this.config = const TrustConfig(),
+    this.repository,
     this.experimentLogger,
     this.simulationGroundTruth,
     this.activeRunId = 'EXP-TRUST-INIT',
@@ -436,6 +439,54 @@ class DynamicTrustManager {
       } catch (_) {
         // Kegagalan pencatatan log tidak boleh menghentikan sistem
       }
+    }
+
+    if (repository != null) {
+      persistState().catchError((_) => false);
+    }
+  }
+
+  /// Menyimpan seluruh state reputasi node ke [repository] persisten.
+  Future<bool> persistState() async {
+    if (repository == null) return false;
+    try {
+      final state = {
+        'schemaVersion': 1,
+        'savedAt': DateTime.now().toUtc().toIso8601String(),
+        'records': _records.map((k, v) => MapEntry(k, v.toMap())),
+      };
+      return await repository!.saveState(state);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Memulihkan state reputasi node dari [repository] persisten.
+  Future<bool> restoreState() async {
+    if (repository == null) return false;
+    try {
+      final state = await repository!.loadState();
+      if (state == null) return false;
+      final version = (state['schemaVersion'] as num?)?.toInt();
+      if (version != 1) return false;
+
+      final rawRecords = state['records'];
+      if (rawRecords is! Map) return false;
+
+      for (final entry in rawRecords.entries) {
+        final nodeId = entry.key.toString();
+        if (entry.value is Map) {
+          try {
+            final record = TrustRecord.fromMap(
+              Map<String, dynamic>.from(entry.value as Map),
+            );
+            _records[nodeId] = record;
+          } catch (_) {}
+        }
+      }
+      return true;
+    } catch (_) {
+      return false;
     }
   }
 

@@ -3,6 +3,69 @@ import 'dart:typed_data';
 /// Status koneksi terhadap peer tertentu pada lapisan transport 1-hop.
 enum PeerConnectionStatus { disconnected, connecting, connected, rejected }
 
+/// Kategori kegagalan diagnostik operasi transport nirkabel.
+enum TransportFailureCategory {
+  /// Izin sistem belum diberikan atau ditolak.
+  permissionDenied,
+
+  /// Radio Bluetooth mati atau belum aktif.
+  bluetoothDisabled,
+
+  /// Kemampuan radio atau perangkat keras nirkabel tidak tersedia / error.
+  radioUnavailable,
+
+  /// Layanan Google Play Services tidak tersedia, usang, atau bermasalah.
+  googlePlayServicesUnavailable,
+
+  /// Operasi sebenarnya sudah berjalan aktif (bukan kegagalan fatal).
+  alreadyRunning,
+
+  /// Konflik strategi koneksi atau resource radio sedang digunakan proses lain.
+  connectionConflict,
+
+  /// Transport gagal diinisialisasi pada layer native.
+  transportInitFailed,
+
+  /// Error tidak dikenal.
+  unknown,
+}
+
+/// Laporan diagnosa teknis kegagalan atau status operasi transport nirkabel.
+class TransportDiagnosticReport {
+  final String operation;
+  final TransportFailureCategory category;
+  final String? exceptionType;
+  final String? platformCode;
+  final int? statusCode;
+  final String? nativeMessage;
+  final Map<String, dynamic> prerequisitesSnapshot;
+  final Map<String, dynamic> transportStateSnapshot;
+  final DateTime timestamp;
+  final String userFriendlyMessage;
+  final String suggestedAction;
+
+  const TransportDiagnosticReport({
+    required this.operation,
+    required this.category,
+    this.exceptionType,
+    this.platformCode,
+    this.statusCode,
+    this.nativeMessage,
+    this.prerequisitesSnapshot = const {},
+    this.transportStateSnapshot = const {},
+    required this.timestamp,
+    required this.userFriendlyMessage,
+    required this.suggestedAction,
+  });
+
+  @override
+  String toString() {
+    return 'TransportDiagnosticReport(op: $operation, category: ${category.name}, '
+        'code: $statusCode, platformCode: $platformCode, '
+        'nativeMsg: "$nativeMessage", state: $transportStateSnapshot, prereq: $prerequisitesSnapshot)';
+  }
+}
+
 /// Model data perangkat fisik tetangga yang terdeteksi oleh transport 1-hop.
 ///
 /// PERHATIAN: [endpointId] adalah identitas sementara yang diberikan oleh transport
@@ -135,6 +198,9 @@ abstract class MeshTransport {
 
   /// Apakah proses discovery sedang aktif.
   bool get isDiscovering;
+
+  /// Laporan diagnosa teknis dari kegagalan operasi terakhir (jika ada).
+  TransportDiagnosticReport? get lastDiagnosticReport => null;
 
   /// Membersihkan seluruh listener dan membebaskan resource transport.
   void dispose();

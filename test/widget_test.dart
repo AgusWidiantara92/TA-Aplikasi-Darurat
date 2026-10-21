@@ -71,7 +71,7 @@ void main() {
     await tester.tap(find.text('Perangkat'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Radar Sinyal Peer-to-Peer'), findsOneWidget);
+    expect(find.text('Perangkat Terdekat'), findsOneWidget);
     expect(find.text('MODE SIAGA • 0 PEER TERDETEKSI'), findsOneWidget);
 
     await tester.drag(find.byType(ListView), const Offset(0, -300));
@@ -326,7 +326,7 @@ void main() {
     await tester.pumpAndSettle();
 
     // Verifikasi radar sinyal peer-to-peer
-    expect(find.text('Radar Sinyal Peer-to-Peer'), findsOneWidget);
+    expect(find.text('Perangkat Terdekat'), findsOneWidget);
 
     // Drag ke atas untuk melihat daftar peer
     await tester.drag(find.byType(ListView), const Offset(0, -300));
@@ -391,12 +391,9 @@ void main() {
     await tester.tap(find.text('Mulai Pindai'));
     await tester.pumpAndSettle();
 
-    // Dialog 'Koneksi Belum Siap' harus muncul
-    expect(find.text('Koneksi Belum Siap'), findsOneWidget);
-    expect(
-      find.textContaining('Bluetooth diperlukan untuk mendeteksi perangkat'),
-      findsOneWidget,
-    );
+    // Dialog 'Bluetooth Belum Aktif' harus muncul
+    expect(find.text('Bluetooth Belum Aktif'), findsOneWidget);
+    expect(find.textContaining('Bluetooth belum aktif'), findsOneWidget);
     expect(find.text('Buka Pengaturan'), findsOneWidget);
     expect(find.text('Coba Lagi'), findsOneWidget);
     expect(find.text('Nanti'), findsOneWidget);
@@ -437,10 +434,7 @@ void main() {
 
       // Dialog 'Izin Diperlukan' dengan aksi Buka Pengaturan dan Batal
       expect(find.text('Izin Diperlukan'), findsOneWidget);
-      expect(
-        find.textContaining('SiagaMesh memerlukan izin Nearby/Bluetooth'),
-        findsOneWidget,
-      );
+      expect(find.textContaining('SiagaMesh memerlukan izin'), findsOneWidget);
       expect(find.text('Buka Pengaturan'), findsOneWidget);
       expect(find.text('Batal'), findsOneWidget);
 

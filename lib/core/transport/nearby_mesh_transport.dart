@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:nearby_connections/nearby_connections.dart';
+import 'connectivity_prerequisite_service.dart';
 import 'mesh_transport.dart';
+import 'transport_diagnostics.dart';
 
 /// Implementasi konkret [MeshTransport] menggunakan Google Nearby Connections API
 /// dengan strategi [Strategy.P2P_CLUSTER] untuk komunikasi 1-hop nirkabel offline.
@@ -10,9 +12,11 @@ class NearbyMeshTransport implements MeshTransport {
 
   final String serviceId;
   final Strategy strategy;
+  final ConnectivityPrerequisiteService _prerequisiteService;
 
   bool _isAdvertising = false;
   bool _isDiscovering = false;
+  TransportDiagnosticReport? _lastDiagnosticReport;
 
   final Map<String, DiscoveredPeer> _peers = {};
 
@@ -26,23 +30,92 @@ class NearbyMeshTransport implements MeshTransport {
   NearbyMeshTransport({
     this.serviceId = defaultServiceId,
     this.strategy = Strategy.P2P_CLUSTER,
-  });
+    ConnectivityPrerequisiteService? prerequisiteService,
+  }) : _prerequisiteService =
+           prerequisiteService ?? ConnectivityPrerequisiteHolder.instance;
+
+  @override
+  TransportDiagnosticReport? get lastDiagnosticReport => _lastDiagnosticReport;
+
+  Map<String, dynamic> _currentTransportStateSnapshot() => {
+    'isAdvertising': _isAdvertising,
+    'isDiscovering': _isDiscovering,
+    'peerCount': _peers.length,
+    'connectedPeerCount': connectedPeers.length,
+  };
 
   @override
   Future<bool> checkAndRequestPermissions() async {
-    // Pada Android, izin dideklarasikan di AndroidManifest.xml.
-    // Pengecekan runtime dapat dikembangkan melalui platform channel jika diperlukan.
-    return true;
+    final check = await _prerequisiteService.checkPrerequisites();
+    if (check.isReady) return true;
+
+    if (check.status == PrerequisiteStatus.permissionRequired) {
+      final granted = await _prerequisiteService.requestPermissions();
+      if (granted) {
+        final recheck = await _prerequisiteService.checkPrerequisites();
+        return recheck.isReady;
+      }
+    }
+    return false;
   }
 
   @override
   Future<bool> startAdvertising({required String localNodeName}) async {
+    final transportSnapshot = _currentTransportStateSnapshot();
+    final prereqCheck = await _prerequisiteService.checkPrerequisites();
+    final prereqSnapshot = prereqCheck.toSnapshot();
+
+    TransportDiagnostics.logOperationStart(
+      operation: 'startAdvertising',
+      transportStateSnapshot: transportSnapshot,
+      prerequisitesSnapshot: prereqSnapshot,
+    );
+
+    // Jika sudah aktif pada layer Dart, pertahankan state aktif
+    if (_isAdvertising) {
+      debugPrint(
+        '[NearbyTransport] startAdvertising: Sudah aktif di layer transport.',
+      );
+      return true;
+    }
+
+    // Verifikasi prasyarat konektivitas
+    if (!prereqCheck.isReady) {
+      final category =
+          prereqCheck.status == PrerequisiteStatus.bluetoothDisabled
+          ? TransportFailureCategory.bluetoothDisabled
+          : (prereqCheck.status ==
+                    PrerequisiteStatus.googlePlayServicesUnavailable
+                ? TransportFailureCategory.googlePlayServicesUnavailable
+                : TransportFailureCategory.permissionDenied);
+
+      final report = TransportDiagnosticReport(
+        operation: 'startAdvertising',
+        category: category,
+        prerequisitesSnapshot: prereqSnapshot,
+        transportStateSnapshot: transportSnapshot,
+        timestamp: DateTime.now(),
+        userFriendlyMessage:
+            prereqCheck.errorMessage ??
+            (category == TransportFailureCategory.bluetoothDisabled
+                ? 'Bluetooth belum aktif pada perangkat ini.'
+                : 'Izin perangkat sekitar belum terpenuhi.'),
+        suggestedAction: category == TransportFailureCategory.bluetoothDisabled
+            ? 'Aktifkan Bluetooth pada perangkat.'
+            : 'Berikan izin yang diperlukan melalui dialog atau pengaturan.',
+      );
+
+      _lastDiagnosticReport = report;
+      TransportDiagnostics.logDiagnostic(report);
+      _isAdvertising = false;
+      return false;
+    }
+
     try {
-      final hasPerm = await checkAndRequestPermissions();
-      if (!hasPerm) {
-        debugPrint('[NearbyTransport] Izin tidak terpenuhi untuk advertising');
-        return false;
-      }
+      // Bersihkan sesi advertising sebelumnya jika ada yang tertinggal
+      try {
+        await Nearby().stopAdvertising();
+      } catch (_) {}
 
       final success = await Nearby().startAdvertising(
         localNodeName,
@@ -70,10 +143,44 @@ class NearbyMeshTransport implements MeshTransport {
       );
 
       _isAdvertising = success;
+      if (success) {
+        _lastDiagnosticReport = null;
+        debugPrint(
+          '[NearbyTransport] startAdvertising BERHASIL aktif untuk: $localNodeName (strategy: ${strategy.name})',
+        );
+      } else {
+        final report = TransportDiagnostics.createReport(
+          operation: 'startAdvertising',
+          error: 'Platform mengembalikan false tanpa exception',
+          prerequisitesSnapshot: prereqSnapshot,
+          transportStateSnapshot: _currentTransportStateSnapshot(),
+        );
+        _lastDiagnosticReport = report;
+        TransportDiagnostics.logDiagnostic(report);
+      }
       return success;
     } catch (e) {
-      debugPrint('[NearbyTransport] Exception startAdvertising: $e');
+      final statusCode = TransportDiagnostics.extractStatusCode(e);
+
+      // Status 8001: STATUS_ALREADY_ADVERTISING menunjukkan operasi sebenarnya sudah berjalan aktif
+      if (statusCode == 8001) {
+        debugPrint(
+          '[NearbyTransport] startAdvertising: Layanan Nearby sudah dalam kondisi aktif di platform (STATUS_ALREADY_ADVERTISING: 8001). Sinkronisasi state transport.',
+        );
+        _isAdvertising = true;
+        _lastDiagnosticReport = null;
+        return true;
+      }
+
       _isAdvertising = false;
+      final report = TransportDiagnostics.createReport(
+        operation: 'startAdvertising',
+        error: e,
+        prerequisitesSnapshot: prereqSnapshot,
+        transportStateSnapshot: _currentTransportStateSnapshot(),
+      );
+      _lastDiagnosticReport = report;
+      TransportDiagnostics.logDiagnostic(report);
       return false;
     }
   }
@@ -91,12 +198,61 @@ class NearbyMeshTransport implements MeshTransport {
 
   @override
   Future<bool> startDiscovery() async {
+    final transportSnapshot = _currentTransportStateSnapshot();
+    final prereqCheck = await _prerequisiteService.checkPrerequisites();
+    final prereqSnapshot = prereqCheck.toSnapshot();
+
+    TransportDiagnostics.logOperationStart(
+      operation: 'startDiscovery',
+      transportStateSnapshot: transportSnapshot,
+      prerequisitesSnapshot: prereqSnapshot,
+    );
+
+    // Jika sudah aktif pada layer Dart, pertahankan state aktif
+    if (_isDiscovering) {
+      debugPrint(
+        '[NearbyTransport] startDiscovery: Sudah aktif di layer transport.',
+      );
+      return true;
+    }
+
+    // Verifikasi prasyarat konektivitas
+    if (!prereqCheck.isReady) {
+      final category =
+          prereqCheck.status == PrerequisiteStatus.bluetoothDisabled
+          ? TransportFailureCategory.bluetoothDisabled
+          : (prereqCheck.status ==
+                    PrerequisiteStatus.googlePlayServicesUnavailable
+                ? TransportFailureCategory.googlePlayServicesUnavailable
+                : TransportFailureCategory.permissionDenied);
+
+      final report = TransportDiagnosticReport(
+        operation: 'startDiscovery',
+        category: category,
+        prerequisitesSnapshot: prereqSnapshot,
+        transportStateSnapshot: transportSnapshot,
+        timestamp: DateTime.now(),
+        userFriendlyMessage:
+            prereqCheck.errorMessage ??
+            (category == TransportFailureCategory.bluetoothDisabled
+                ? 'Bluetooth belum aktif pada perangkat ini.'
+                : 'Izin perangkat sekitar belum terpenuhi.'),
+        suggestedAction: category == TransportFailureCategory.bluetoothDisabled
+            ? 'Aktifkan Bluetooth pada perangkat.'
+            : 'Berikan izin yang diperlukan melalui dialog atau pengaturan.',
+      );
+
+      _lastDiagnosticReport = report;
+      TransportDiagnostics.logDiagnostic(report);
+      _isDiscovering = false;
+      return false;
+    }
+
     try {
-      final hasPerm = await checkAndRequestPermissions();
-      if (!hasPerm) {
-        debugPrint('[NearbyTransport] Izin tidak terpenuhi untuk discovery');
-        return false;
-      }
+      // Bersihkan sesi discovery sebelumnya jika ada yang tertinggal
+      try {
+        await Nearby().stopDiscovery();
+      } catch (_) {}
 
       final success = await Nearby().startDiscovery(
         'SiagaMesh-User',
@@ -125,10 +281,44 @@ class NearbyMeshTransport implements MeshTransport {
       );
 
       _isDiscovering = success;
+      if (success) {
+        _lastDiagnosticReport = null;
+        debugPrint(
+          '[NearbyTransport] startDiscovery BERHASIL aktif (strategy: ${strategy.name})',
+        );
+      } else {
+        final report = TransportDiagnostics.createReport(
+          operation: 'startDiscovery',
+          error: 'Platform mengembalikan false tanpa exception',
+          prerequisitesSnapshot: prereqSnapshot,
+          transportStateSnapshot: _currentTransportStateSnapshot(),
+        );
+        _lastDiagnosticReport = report;
+        TransportDiagnostics.logDiagnostic(report);
+      }
       return success;
     } catch (e) {
-      debugPrint('[NearbyTransport] Exception startDiscovery: $e');
+      final statusCode = TransportDiagnostics.extractStatusCode(e);
+
+      // Status 8002: STATUS_ALREADY_DISCOVERING menunjukkan operasi sebenarnya sudah berjalan aktif
+      if (statusCode == 8002) {
+        debugPrint(
+          '[NearbyTransport] startDiscovery: Layanan Nearby sudah dalam kondisi aktif di platform (STATUS_ALREADY_DISCOVERING: 8002). Sinkronisasi state transport.',
+        );
+        _isDiscovering = true;
+        _lastDiagnosticReport = null;
+        return true;
+      }
+
       _isDiscovering = false;
+      final report = TransportDiagnostics.createReport(
+        operation: 'startDiscovery',
+        error: e,
+        prerequisitesSnapshot: prereqSnapshot,
+        transportStateSnapshot: _currentTransportStateSnapshot(),
+      );
+      _lastDiagnosticReport = report;
+      TransportDiagnostics.logDiagnostic(report);
       return false;
     }
   }
@@ -243,6 +433,7 @@ class NearbyMeshTransport implements MeshTransport {
       await Nearby().stopAllEndpoints();
       _peers.clear();
       _emitPeers();
+      _lastDiagnosticReport = null;
     } catch (e) {
       debugPrint('[NearbyTransport] Exception stopAll: $e');
     }

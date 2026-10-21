@@ -57,6 +57,7 @@ class _MainNavigationScaffoldState extends State<MainNavigationScaffold> {
         onNavigateToMessages: () => _onTabSelected(1),
         onNavigateToDevices: () => _onTabSelected(2),
         transport: widget.transport,
+        repository: widget.repository,
       ),
       ChatListScreen(repository: widget.repository),
       MeshDevicesScreen(

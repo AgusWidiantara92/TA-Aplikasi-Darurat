@@ -16,6 +16,9 @@ enum PrerequisiteStatus {
   /// Radio Bluetooth mati atau belum aktif.
   bluetoothDisabled,
 
+  /// Layanan Google Play Services tidak tersedia atau perlu diperbarui.
+  googlePlayServicesUnavailable,
+
   /// Terjadi kesalahan internal atau platform tidak didukung.
   error,
 }
@@ -26,20 +29,41 @@ class PrerequisiteCheckResult {
   final bool permissionsGranted;
   final bool bluetoothEnabled;
   final bool permanentlyDenied;
+  final bool locationEnabled;
+  final bool googlePlayServicesAvailable;
+  final int googlePlayServicesStatusCode;
   final List<String> missingPermissions;
   final String? errorMessage;
+  final int? androidVersion;
 
   const PrerequisiteCheckResult({
     required this.status,
     this.permissionsGranted = true,
     this.bluetoothEnabled = true,
     this.permanentlyDenied = false,
+    this.locationEnabled = true,
+    this.googlePlayServicesAvailable = true,
+    this.googlePlayServicesStatusCode = 0,
     this.missingPermissions = const [],
     this.errorMessage,
+    this.androidVersion,
   });
 
   /// Mengembalikan `true` jika perangkat siap untuk memindai atau menyiarkan sinyal.
   bool get isReady => status == PrerequisiteStatus.ready;
+
+  /// Representasi snapshot untuk keperluan logging diagnostik.
+  Map<String, dynamic> toSnapshot() => {
+    'status': status.name,
+    'permissionsGranted': permissionsGranted,
+    'bluetoothEnabled': bluetoothEnabled,
+    'permanentlyDenied': permanentlyDenied,
+    'locationEnabled': locationEnabled,
+    'googlePlayServicesAvailable': googlePlayServicesAvailable,
+    'googlePlayServicesStatusCode': googlePlayServicesStatusCode,
+    'missingPermissions': missingPermissions,
+    'androidVersion': androidVersion,
+  };
 }
 
 /// Kontrak layanan pemeriksaan prasyarat konektivitas nirkabel dan izin sistem.
@@ -79,6 +103,10 @@ class AndroidConnectivityPrerequisiteService
       final permissionsGranted = res['permissionsGranted'] as bool? ?? false;
       final bluetoothEnabled = res['bluetoothEnabled'] as bool? ?? false;
       final permanentlyDenied = res['permanentlyDenied'] as bool? ?? false;
+      final locationEnabled = res['locationEnabled'] as bool? ?? true;
+      final gmsAvailable = res['googlePlayServicesAvailable'] as bool? ?? true;
+      final gmsStatusCode = res['googlePlayServicesStatusCode'] as int? ?? 0;
+      final androidVersion = res['androidVersion'] as int?;
       final rawMissing = res['missingPermissions'] as List<dynamic>? ?? [];
       final missingPermissions = rawMissing.map((e) => e.toString()).toList();
 
@@ -89,7 +117,11 @@ class AndroidConnectivityPrerequisiteService
             permissionsGranted: false,
             bluetoothEnabled: bluetoothEnabled,
             permanentlyDenied: true,
+            locationEnabled: locationEnabled,
+            googlePlayServicesAvailable: gmsAvailable,
+            googlePlayServicesStatusCode: gmsStatusCode,
             missingPermissions: missingPermissions,
+            androidVersion: androidVersion,
           );
         }
         return PrerequisiteCheckResult(
@@ -97,7 +129,11 @@ class AndroidConnectivityPrerequisiteService
           permissionsGranted: false,
           bluetoothEnabled: bluetoothEnabled,
           permanentlyDenied: false,
+          locationEnabled: locationEnabled,
+          googlePlayServicesAvailable: gmsAvailable,
+          googlePlayServicesStatusCode: gmsStatusCode,
           missingPermissions: missingPermissions,
+          androidVersion: androidVersion,
         );
       }
 
@@ -107,14 +143,38 @@ class AndroidConnectivityPrerequisiteService
           permissionsGranted: true,
           bluetoothEnabled: false,
           permanentlyDenied: false,
+          locationEnabled: locationEnabled,
+          googlePlayServicesAvailable: gmsAvailable,
+          googlePlayServicesStatusCode: gmsStatusCode,
           missingPermissions: missingPermissions,
+          androidVersion: androidVersion,
         );
       }
 
-      return const PrerequisiteCheckResult(
+      if (!gmsAvailable) {
+        return PrerequisiteCheckResult(
+          status: PrerequisiteStatus.googlePlayServicesUnavailable,
+          permissionsGranted: true,
+          bluetoothEnabled: bluetoothEnabled,
+          permanentlyDenied: false,
+          locationEnabled: locationEnabled,
+          googlePlayServicesAvailable: false,
+          googlePlayServicesStatusCode: gmsStatusCode,
+          missingPermissions: missingPermissions,
+          androidVersion: androidVersion,
+          errorMessage:
+              'Google Play Services tidak siap (kode: $gmsStatusCode)',
+        );
+      }
+
+      return PrerequisiteCheckResult(
         status: PrerequisiteStatus.ready,
         permissionsGranted: true,
         bluetoothEnabled: true,
+        locationEnabled: locationEnabled,
+        googlePlayServicesAvailable: true,
+        googlePlayServicesStatusCode: gmsStatusCode,
+        androidVersion: androidVersion,
       );
     } catch (e) {
       debugPrint('[PrerequisiteService] Gagal memeriksa prasyarat: $e');

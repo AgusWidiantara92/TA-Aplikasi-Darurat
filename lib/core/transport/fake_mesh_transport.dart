@@ -9,6 +9,22 @@ class FakeMeshTransport implements MeshTransport {
   bool _isDiscovering = false;
   bool _permissionsGranted = true;
 
+  TransportDiagnosticReport? _lastDiagnosticReport;
+
+  bool failNextStartAdvertising = false;
+  TransportDiagnosticReport? advertisingFailureReport;
+  bool simulateAlreadyAdvertising = false;
+
+  bool failNextStartDiscovery = false;
+  TransportDiagnosticReport? discoveryFailureReport;
+  bool simulateAlreadyDiscovering = false;
+
+  int startAdvertisingCallCount = 0;
+  int startDiscoveryCallCount = 0;
+  int stopAdvertisingCallCount = 0;
+  int stopDiscoveryCallCount = 0;
+  String? lastAdvertisedName;
+
   final Map<String, DiscoveredPeer> _peers = {};
   final List<TransportPayload> _sentPayloads = [];
 
@@ -23,6 +39,10 @@ class FakeMeshTransport implements MeshTransport {
 
   void setPermissionsGranted(bool granted) {
     _permissionsGranted = granted;
+  }
+
+  void setLastDiagnosticReport(TransportDiagnosticReport? report) {
+    _lastDiagnosticReport = report;
   }
 
   List<TransportPayload> get sentPayloads => List.unmodifiable(_sentPayloads);
@@ -60,14 +80,16 @@ class FakeMeshTransport implements MeshTransport {
     );
     _peers[endpointId] = updated;
     _emitPeers();
-    _eventsController.add(
-      TransportConnectionEvent(
-        endpointId: endpointId,
-        endpointName: endpointName,
-        status: PeerConnectionStatus.connecting,
-        details: 'Permintaan koneksi masuk tiruan',
-      ),
-    );
+    if (!_eventsController.isClosed) {
+      _eventsController.add(
+        TransportConnectionEvent(
+          endpointId: endpointId,
+          endpointName: endpointName,
+          status: PeerConnectionStatus.connecting,
+          details: 'Permintaan koneksi masuk tiruan',
+        ),
+      );
+    }
   }
 
   /// Menyimulasikan penerimaan byte payload dari peer tertentu.
@@ -75,13 +97,15 @@ class FakeMeshTransport implements MeshTransport {
     required String endpointId,
     required Uint8List bytes,
   }) {
-    _payloadController.add(
-      TransportPayload(
-        endpointId: endpointId,
-        bytes: bytes,
-        receivedAt: DateTime.now(),
-      ),
-    );
+    if (!_payloadController.isClosed) {
+      _payloadController.add(
+        TransportPayload(
+          endpointId: endpointId,
+          bytes: bytes,
+          receivedAt: DateTime.now(),
+        ),
+      );
+    }
   }
 
   /// Menyimulasikan pemutusan koneksi secara tiba-tiba oleh sistem/peer.
@@ -92,14 +116,16 @@ class FakeMeshTransport implements MeshTransport {
         status: PeerConnectionStatus.disconnected,
       );
       _emitPeers();
-      _eventsController.add(
-        TransportConnectionEvent(
-          endpointId: endpointId,
-          endpointName: peer.endpointName,
-          status: PeerConnectionStatus.disconnected,
-          details: 'Simulasi pemutusan koneksi',
-        ),
-      );
+      if (!_eventsController.isClosed) {
+        _eventsController.add(
+          TransportConnectionEvent(
+            endpointId: endpointId,
+            endpointName: peer.endpointName,
+            status: PeerConnectionStatus.disconnected,
+            details: 'Simulasi pemutusan koneksi',
+          ),
+        );
+      }
     }
   }
 
@@ -112,31 +138,103 @@ class FakeMeshTransport implements MeshTransport {
   // --- Implementasi MeshTransport ---
 
   @override
+  TransportDiagnosticReport? get lastDiagnosticReport => _lastDiagnosticReport;
+
+  @override
   Future<bool> checkAndRequestPermissions() async {
     return _permissionsGranted;
   }
 
   @override
   Future<bool> startAdvertising({required String localNodeName}) async {
-    if (!_permissionsGranted) return false;
+    startAdvertisingCallCount++;
+    lastAdvertisedName = localNodeName;
+    if (!_permissionsGranted) {
+      _lastDiagnosticReport = TransportDiagnosticReport(
+        operation: 'startAdvertising',
+        category: TransportFailureCategory.permissionDenied,
+        timestamp: DateTime.now(),
+        userFriendlyMessage: 'Izin sistem belum diberikan.',
+        suggestedAction: 'Buka pengaturan untuk mengaktifkan izin.',
+      );
+      _isAdvertising = false;
+      return false;
+    }
+
+    if (simulateAlreadyAdvertising) {
+      _isAdvertising = true;
+      _lastDiagnosticReport = null;
+      return true;
+    }
+
+    if (failNextStartAdvertising) {
+      _isAdvertising = false;
+      _lastDiagnosticReport =
+          advertisingFailureReport ??
+          TransportDiagnosticReport(
+            operation: 'startAdvertising',
+            category: TransportFailureCategory.transportInitFailed,
+            timestamp: DateTime.now(),
+            userFriendlyMessage: 'Simulasi kegagalan startAdvertising',
+            suggestedAction: 'Coba lagi beberapa saat lagi.',
+          );
+      return false;
+    }
+
     _isAdvertising = true;
+    _lastDiagnosticReport = null;
     return true;
   }
 
   @override
   Future<void> stopAdvertising() async {
+    stopAdvertisingCallCount++;
     _isAdvertising = false;
   }
 
   @override
   Future<bool> startDiscovery() async {
-    if (!_permissionsGranted) return false;
+    startDiscoveryCallCount++;
+    if (!_permissionsGranted) {
+      _lastDiagnosticReport = TransportDiagnosticReport(
+        operation: 'startDiscovery',
+        category: TransportFailureCategory.permissionDenied,
+        timestamp: DateTime.now(),
+        userFriendlyMessage: 'Izin sistem belum diberikan.',
+        suggestedAction: 'Buka pengaturan untuk mengaktifkan izin.',
+      );
+      _isDiscovering = false;
+      return false;
+    }
+
+    if (simulateAlreadyDiscovering) {
+      _isDiscovering = true;
+      _lastDiagnosticReport = null;
+      return true;
+    }
+
+    if (failNextStartDiscovery) {
+      _isDiscovering = false;
+      _lastDiagnosticReport =
+          discoveryFailureReport ??
+          TransportDiagnosticReport(
+            operation: 'startDiscovery',
+            category: TransportFailureCategory.transportInitFailed,
+            timestamp: DateTime.now(),
+            userFriendlyMessage: 'Simulasi kegagalan startDiscovery',
+            suggestedAction: 'Coba lagi beberapa saat lagi.',
+          );
+      return false;
+    }
+
     _isDiscovering = true;
+    _lastDiagnosticReport = null;
     return true;
   }
 
   @override
   Future<void> stopDiscovery() async {
+    stopDiscoveryCallCount++;
     _isDiscovering = false;
   }
 
@@ -222,6 +320,7 @@ class FakeMeshTransport implements MeshTransport {
     }
     _peers.clear();
     _emitPeers();
+    _lastDiagnosticReport = null;
   }
 
   @override

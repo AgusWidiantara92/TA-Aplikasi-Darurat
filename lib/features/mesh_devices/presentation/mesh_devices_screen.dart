@@ -1,7 +1,8 @@
 import 'dart:async';
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import '../../../core/constants/app_colors.dart';
+import '../../../core/routing/node_identity.dart';
+import '../../../core/routing/routing_holder.dart';
 import '../../../core/transport/connectivity_prerequisite_service.dart';
 import '../../../core/transport/mesh_transport.dart';
 import '../../../core/transport/transport_holder.dart';
@@ -10,9 +11,8 @@ import '../../../core/widgets/siagamesh_dialog.dart';
 import '../../../core/widgets/status_badge.dart';
 import '../../chat/data/repositories/chat_repository.dart';
 import '../../chat/presentation/chat_detail_screen.dart';
-import 'widgets/radar_widget.dart';
 
-/// Layar Perangkat Terdekat & Radar sesuai referensi Layar 4 pada desain.jpg.
+/// Layar Perangkat Terdekat yang bersih, intuitif, dan ramah pengguna tanpa radar dekoratif.
 class MeshDevicesScreen extends StatefulWidget {
   final ChatRepository? repository;
   final MeshTransport? transport;
@@ -40,7 +40,7 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
   bool _isAdvertising = false;
   bool _isDiscovering = false;
   bool _isDialogShowing = false;
-  TransportConnectionEvent? _lastEvent;
+  bool _isOperating = false;
 
   @override
   void initState() {
@@ -67,7 +67,6 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
     _eventsSub = _transport.connectionEventsStream.listen((event) {
       if (!mounted) return;
       setState(() {
-        _lastEvent = event;
         _physicalPeers = _transport.currentPeers;
         _isAdvertising = _transport.isAdvertising;
         _isDiscovering = _transport.isDiscovering;
@@ -75,7 +74,7 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            '[Transport 1-Hop] ${event.endpointName}: ${event.status.name} ${event.details ?? ""}',
+            '${event.endpointName}: ${event.status.name} ${event.details ?? ""}',
           ),
           duration: const Duration(seconds: 2),
         ),
@@ -158,7 +157,6 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
     }
 
     if (check.status == PrerequisiteStatus.permissionRequired) {
-      // Coba minta via runtime dialog terlebih dahulu
       final granted = await _prerequisiteService.requestPermissions();
       if (granted) {
         final recheck = await _prerequisiteService.checkPrerequisites();
@@ -169,7 +167,6 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
         }
       }
 
-      // Jika ditolak setelah diminta
       final recheck = await _prerequisiteService.checkPrerequisites();
       if (recheck.permanentlyDenied) {
         await _showPrerequisiteDialog(
@@ -231,7 +228,6 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
       return _handleBluetoothDisabled(onRetry);
     }
 
-    // Default error/fallback (Koneksi Belum Siap)
     await _showPrerequisiteDialog(
       title: 'Koneksi Belum Siap',
       message:
@@ -266,9 +262,9 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
 
   Future<bool> _handleBluetoothDisabled(VoidCallback onRetry) async {
     await _showPrerequisiteDialog(
-      title: 'Koneksi Belum Siap',
+      title: 'Bluetooth Belum Aktif',
       message:
-          'Bluetooth diperlukan untuk mendeteksi perangkat sekitar dalam jaringan mesh. Aktifkan Bluetooth untuk melanjutkan.',
+          'Bluetooth belum aktif. Aktifkan Bluetooth pada perangkat Anda untuk mendeteksi dan menghubungkan node di sekitar.',
       icon: Icons.bluetooth_disabled_rounded,
       iconColor: AppColors.warningOrange,
       actions: [
@@ -297,118 +293,142 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
     return false;
   }
 
+  Future<void> _showDiagnosticFailureDialog({
+    required TransportDiagnosticReport report,
+    required VoidCallback onRetry,
+  }) async {
+    if (_isDialogShowing || !mounted) return;
+    _isDialogShowing = true;
+
+    String action = report.suggestedAction;
+    if (report.category == TransportFailureCategory.transportInitFailed &&
+        report.operation == 'startAdvertising') {
+      action = 'Pastikan radio nirkabel aktif dan coba lagi.';
+    } else if (report.category == TransportFailureCategory.unknown) {
+      action = 'Silakan coba kembali.';
+    } else if (action.isEmpty) {
+      action = 'Coba lagi dalam beberapa saat.';
+    }
+
+    final String message = '${report.userFriendlyMessage} $action'.trim();
+
+    try {
+      await SiagaMeshDialog.show(
+        context: context,
+        icon: Icons.error_outline_rounded,
+        iconColor: AppColors.emergencyRed,
+        title: 'Gagal Memulai Koneksi',
+        message: message,
+        actions: [
+          SiagaMeshDialogAction(
+            label: 'Coba Lagi',
+            isPrimary: true,
+            onPressed: () {
+              Navigator.pop(context);
+              onRetry();
+            },
+          ),
+          SiagaMeshDialogAction(
+            label: 'Nanti',
+            onPressed: () => Navigator.pop(context),
+          ),
+        ],
+      );
+    } finally {
+      _isDialogShowing = false;
+    }
+  }
+
   void _toggleAdvertising() async {
+    if (_isOperating) return;
+    _isOperating = true;
+
+    bool needsFailureDialog = false;
+    TransportDiagnosticReport? failureReport;
+
     if (_isAdvertising) {
       await _transport.stopAdvertising();
       if (!mounted) return;
       setState(() {
         _isAdvertising = false;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Siaran (Advertising) 1-hop dihentikan.'),
-          duration: Duration(seconds: 1),
-        ),
-      );
+      _isOperating = false;
     } else {
       final ready = await _ensurePrerequisitesMet(onRetry: _toggleAdvertising);
-      if (!ready || !mounted) return;
+      if (!ready || !mounted) {
+        _isOperating = false;
+        return;
+      }
 
+      // Gunakan nama ramah pengguna (displayName) untuk advertising
+      final localName = ManetRoutingHolder.displayName;
       final success = await _transport.startAdvertising(
-        localNodeName:
-            'SiagaMesh-${DateTime.now().millisecondsSinceEpoch % 1000}',
+        localNodeName: localName,
       );
-      if (!mounted) return;
+
+      if (!mounted) {
+        _isOperating = false;
+        return;
+      }
       setState(() {
         _isAdvertising = success;
       });
 
       if (!success) {
-        debugPrint('[MeshDevices] Inisialisasi startAdvertising gagal.');
-        await _showPrerequisiteDialog(
-          title: 'Inisialisasi Mesh Gagal',
-          message:
-              'Gagal menginisialisasi siaran node mesh terdekat. Pastikan radio nirkabel Anda aktif dan coba lagi.',
-          icon: Icons.error_outline_rounded,
-          iconColor: AppColors.emergencyRed,
-          actions: [
-            SiagaMeshDialogAction(
-              label: 'Coba Lagi',
-              isPrimary: true,
-              onPressed: () {
-                Navigator.pop(context);
-                _toggleAdvertising();
-              },
-            ),
-            SiagaMeshDialogAction(
-              label: 'Nanti',
-              onPressed: () => Navigator.pop(context),
-            ),
-          ],
-        );
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Siaran (Advertising) 1-hop AKTIF.'),
-            duration: Duration(seconds: 2),
-          ),
+        failureReport = _transport.lastDiagnosticReport;
+        needsFailureDialog = true;
+      }
+      _isOperating = false;
+
+      if (needsFailureDialog && failureReport != null) {
+        _showDiagnosticFailureDialog(
+          report: failureReport,
+          onRetry: _toggleAdvertising,
         );
       }
     }
   }
 
   void _toggleDiscovery() async {
+    if (_isOperating) return;
+    _isOperating = true;
+
+    bool needsFailureDialog = false;
+    TransportDiagnosticReport? failureReport;
+
     if (_isDiscovering) {
       await _transport.stopDiscovery();
       if (!mounted) return;
       setState(() {
         _isDiscovering = false;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Pemindaian (Discovery) 1-hop dihentikan.'),
-          duration: Duration(seconds: 1),
-        ),
-      );
+      _isOperating = false;
     } else {
       final ready = await _ensurePrerequisitesMet(onRetry: _toggleDiscovery);
-      if (!ready || !mounted) return;
+      if (!ready || !mounted) {
+        _isOperating = false;
+        return;
+      }
 
       final success = await _transport.startDiscovery();
-      if (!mounted) return;
+      if (!mounted) {
+        _isOperating = false;
+        return;
+      }
       setState(() {
         _isDiscovering = success;
       });
 
       if (!success) {
-        debugPrint('[MeshDevices] Inisialisasi startDiscovery gagal.');
-        await _showPrerequisiteDialog(
-          title: 'Inisialisasi Mesh Gagal',
-          message:
-              'Gagal menginisialisasi layanan mesh terdekat. Pastikan radio nirkabel Anda aktif dan tidak sedang digunakan aplikasi lain, lalu coba lagi.',
-          icon: Icons.error_outline_rounded,
-          iconColor: AppColors.emergencyRed,
-          actions: [
-            SiagaMeshDialogAction(
-              label: 'Coba Lagi',
-              isPrimary: true,
-              onPressed: () {
-                Navigator.pop(context);
-                _toggleDiscovery();
-              },
-            ),
-            SiagaMeshDialogAction(
-              label: 'Nanti',
-              onPressed: () => Navigator.pop(context),
-            ),
-          ],
-        );
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Pemindaian (Discovery) 1-hop AKTIF.'),
-            duration: Duration(seconds: 2),
-          ),
+        failureReport = _transport.lastDiagnosticReport;
+        needsFailureDialog = true;
+      }
+      _isOperating = false;
+
+      if (needsFailureDialog && failureReport != null) {
+        _showDiagnosticFailureDialog(
+          report: failureReport,
+          onRetry: _toggleDiscovery,
         );
       }
     }
@@ -417,13 +437,13 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
   void _connectToPhysicalPeer(DiscoveredPeer peer) async {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('Meminta koneksi 1-hop ke ${peer.endpointName}...'),
+        content: Text('Meminta koneksi ke ${peer.endpointName}...'),
         duration: const Duration(seconds: 1),
       ),
     );
     await _transport.requestConnection(
       endpointId: peer.endpointId,
-      localNodeName: 'SiagaMesh-User',
+      localNodeName: ManetRoutingHolder.displayName,
     );
   }
 
@@ -432,11 +452,25 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
   }
 
   void _openChatWithPhysicalPeer(DiscoveredPeer peer) async {
-    final conv = await _repository.getOrCreateConversationForNode(
-      nodeId: 'peer-${peer.endpointId}',
-      nodeName: peer.endpointName,
-      isConnected: peer.status == PeerConnectionStatus.connected,
+    final routing = ManetRoutingHolder.instance;
+    final resolvedNodeId = routing.neighborTable.getNodeIdForEndpoint(
+      peer.endpointId,
     );
+    final targetNodeId = resolvedNodeId ?? 'peer-${peer.endpointId}';
+
+    final conv = _repository is LocalChatRepository
+        ? await (_repository as LocalChatRepository)
+              .getOrCreateConversationForNode(
+                nodeId: targetNodeId,
+                nodeName: peer.endpointName,
+                isConnected: peer.status == PeerConnectionStatus.connected,
+                endpointId: peer.endpointId,
+              )
+        : await _repository.getOrCreateConversationForNode(
+            nodeId: targetNodeId,
+            nodeName: peer.endpointName,
+            isConnected: peer.status == PeerConnectionStatus.connected,
+          );
     if (!mounted) return;
     Navigator.push(
       context,
@@ -445,64 +479,88 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
           conversationId: conv.id,
           conversationTitle: conv.title,
           nodeId: conv.nodeId,
+          peerNodeId: resolvedNodeId ?? conv.peerNodeId ?? targetNodeId,
           isEmergency: false,
           repository: _repository,
           transport: _transport,
-          peerEndpointId: peer.endpointId,
+          routingEngine: routing,
+          peerEndpointId:
+              routing.neighborTable.getEndpointIdForNode(targetNodeId) ??
+              peer.endpointId,
         ),
       ),
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final blips = <RadarBlip>[];
-    for (int i = 0; i < _physicalPeers.length; i++) {
-      final peer = _physicalPeers[i];
-      final angle =
-          (i *
-              (2 *
-                  math.pi /
-                  (_physicalPeers.isEmpty ? 1 : _physicalPeers.length))) +
-          0.5;
-      final distance = peer.status == PeerConnectionStatus.connected
-          ? 0.45
-          : (peer.status == PeerConnectionStatus.connecting ? 0.65 : 0.85);
-      final color = peer.status == PeerConnectionStatus.connected
-          ? AppColors.successGreen
-          : (peer.status == PeerConnectionStatus.connecting
-                ? AppColors.warningOrange
-                : AppColors.accentBlue);
-      blips.add(
-        RadarBlip(
-          label: peer.endpointName.length > 10
-              ? peer.endpointName.substring(0, 10)
-              : peer.endpointName,
-          angle: angle,
-          distanceFactor: distance,
-          color: color,
-        ),
+  /// Menduplikasi daftar peer yang ditemukan berdasarkan identitas node kanonis.
+  List<DiscoveredPeer> _deduplicatePeers(List<DiscoveredPeer> peers) {
+    final routing = ManetRoutingHolder.instance;
+    final Map<String, DiscoveredPeer> grouped = {};
+
+    for (final peer in peers) {
+      final resolvedNodeId = routing.neighborTable.getNodeIdForEndpoint(
+        peer.endpointId,
       );
+      // Gunakan nodeId terverifikasi jika ada, atau endpointId jika masih pending
+      // Jangan pernah gunakan displayName agar dua perangkat berbeda dengan nama sama tidak digabungkan
+      final key =
+          resolvedNodeId != null && !resolvedNodeId.startsWith('pending-')
+          ? 'node:${resolvedNodeId.toLowerCase()}'
+          : 'ep:${peer.endpointId}';
+
+      if (!grouped.containsKey(key)) {
+        grouped[key] = peer;
+      } else {
+        final current = grouped[key]!;
+        // Prioritaskan endpoint yang sedang terhubung aktif
+        if (peer.status == PeerConnectionStatus.connected &&
+            current.status != PeerConnectionStatus.connected) {
+          grouped[key] = peer;
+        } else if (peer.status == current.status &&
+            peer.discoveredAt.isAfter(current.discoveredAt)) {
+          grouped[key] = peer;
+        }
+      }
     }
 
-    final connectedCount = _transport.connectedPeers.length;
-    final availableCount = _physicalPeers
-        .where((p) => p.status != PeerConnectionStatus.connected)
-        .length;
+    return grouped.values.toList();
+  }
 
+  String _getInitials(String name) {
+    final parts = name.trim().split(RegExp(r'\s+'));
+    if (parts.isEmpty || parts[0].isEmpty) return '?';
+    if (parts.length == 1) {
+      final w = parts[0];
+      return w.substring(0, w.length >= 2 ? 2 : 1).toUpperCase();
+    }
+    return '${parts[0][0]}${parts[1][0]}'.toUpperCase();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dedupedPeers = _deduplicatePeers(_physicalPeers);
+    final connectedCount = dedupedPeers
+        .where((p) => p.status == PeerConnectionStatus.connected)
+        .length;
+    final totalCount = dedupedPeers.length;
+
+    // Status label terpadu
     final String statusLabel;
     if (connectedCount > 0) {
       statusLabel = 'TERHUBUNG • $connectedCount PEER AKTIF';
     } else if (_isDiscovering) {
-      statusLabel = 'MEMINDAI • ${_physicalPeers.length} PEER TERDETEKSI';
+      statusLabel = 'MEMINDAI • $totalCount PEER TERDETEKSI';
     } else if (_isAdvertising) {
       statusLabel = 'MENYIARKAN • NODE TERLIHAT';
-    } else if (_lastEvent != null &&
-        _lastEvent!.status == PeerConnectionStatus.disconnected &&
-        _physicalPeers.isEmpty) {
-      statusLabel = 'KONEKSI TERPUTUS • SIAGA';
     } else {
-      statusLabel = 'MODE SIAGA • ${_physicalPeers.length} PEER TERDETEKSI';
+      statusLabel = 'MODE SIAGA • $totalCount PEER TERDETEKSI';
+    }
+
+    // Hitung kemunculan nama untuk deteksi nama duplikat antar perangkat unik
+    final nameCounts = <String, int>{};
+    for (final p in dedupedPeers) {
+      final key = p.endpointName.trim().toLowerCase();
+      nameCounts[key] = (nameCounts[key] ?? 0) + 1;
     }
 
     return Scaffold(
@@ -518,7 +576,7 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
               child: ListView(
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 96),
                 children: [
-                  // Banner Card Biru Gelap
+                  // Kartu Ringkasan Perangkat
                   Container(
                     width: double.infinity,
                     padding: const EdgeInsets.all(16),
@@ -529,14 +587,28 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          statusLabel,
-                          style: const TextStyle(
-                            color: AppColors.accentCyan,
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold,
-                            letterSpacing: 0.5,
-                          ),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Expanded(
+                              child: Text(
+                                statusLabel,
+                                style: const TextStyle(
+                                  color: AppColors.accentCyan,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                  letterSpacing: 0.5,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            if (_isDiscovering)
+                              const Icon(
+                                Icons.sync,
+                                size: 14,
+                                color: AppColors.accentCyan,
+                              ),
+                          ],
                         ),
                         const SizedBox(height: 6),
                         const Text(
@@ -548,10 +620,10 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
                           ),
                         ),
                         const SizedBox(height: 4),
-                        Text(
-                          'Memindai perangkat sekitar via Bluetooth LE & Wi-Fi Direct otomatis dalam jaringan mesh independen tanpa internet.',
+                        const Text(
+                          'Komunikasi langsung nirkabel antar-perangkat via Bluetooth LE dan Wi-Fi Direct tanpa internet.',
                           style: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.8),
+                            color: Colors.white70,
                             fontSize: 12,
                             height: 1.3,
                           ),
@@ -560,9 +632,9 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
                     ),
                   ),
 
-                  const SizedBox(height: 14),
+                  const SizedBox(height: 12),
 
-                  // Statistik Cepat (3 Kolom)
+                  // Statistik Cepat Ringkas (2 Kolom)
                   Row(
                     children: [
                       Expanded(
@@ -575,16 +647,8 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
                       const SizedBox(width: 8),
                       Expanded(
                         child: _buildMetricTile(
-                          number: '$availableCount',
-                          label: 'TERSEDIA',
-                          color: AppColors.accentBlue,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: _buildMetricTile(
-                          number: '${_physicalPeers.length}',
-                          label: 'TOTAL PEER',
+                          number: '$totalCount',
+                          label: 'TOTAL TERDETEKSI',
                           color: AppColors.primaryNavy,
                         ),
                       ),
@@ -593,39 +657,35 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
 
                   const SizedBox(height: 14),
 
-                  // Visualisasi Radar P2P
-                  RadarWidget(
-                    blips: blips,
-                    isScanning: _isDiscovering || _isAdvertising,
-                  ),
-
-                  const SizedBox(height: 18),
-
-                  // Bagian Kontrol Radio Transport Fisik 1-Hop
+                  // Kontrol Radio Nirkabel
                   _buildRadioControls(),
 
-                  const SizedBox(height: 18),
+                  const SizedBox(height: 16),
 
-                  // Judul Bagian Peer
+                  // Header Daftar Peer
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(
-                        'Daftar Peer Terdeteksi (${_physicalPeers.length})',
-                        style: const TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.bold,
-                          color: AppColors.primaryNavy,
+                      Expanded(
+                        child: Text(
+                          'Daftar Peer Terdeteksi ($totalCount)',
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                            color: AppColors.primaryNavy,
+                          ),
+                          overflow: TextOverflow.ellipsis,
                         ),
                       ),
+                      const SizedBox(width: 8),
                       StatusBadge(
-                        label: _physicalPeers.isNotEmpty
-                            ? '${_physicalPeers.length} TERDETEKSI'
+                        label: dedupedPeers.isNotEmpty
+                            ? '$totalCount TERDETEKSI'
                             : 'KOSONG',
-                        backgroundColor: _physicalPeers.isNotEmpty
+                        backgroundColor: dedupedPeers.isNotEmpty
                             ? AppColors.accentPillBg
                             : AppColors.surfaceSubtle,
-                        textColor: _physicalPeers.isNotEmpty
+                        textColor: dedupedPeers.isNotEmpty
                             ? AppColors.accentBlue
                             : AppColors.textMuted,
                         fontSize: 9,
@@ -639,12 +699,12 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
 
                   const SizedBox(height: 10),
 
-                  // Daftar Peer atau Empty State
-                  if (_physicalPeers.isEmpty)
+                  // Daftar Peer atau Empty State Bersih
+                  if (dedupedPeers.isEmpty)
                     Container(
                       width: double.infinity,
                       padding: const EdgeInsets.symmetric(
-                        vertical: 24,
+                        vertical: 28,
                         horizontal: 16,
                       ),
                       decoration: BoxDecoration(
@@ -689,45 +749,29 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
                               height: 1.4,
                             ),
                           ),
-                          if (!_isDiscovering) ...[
-                            const SizedBox(height: 14),
-                            OutlinedButton.icon(
-                              style: OutlinedButton.styleFrom(
-                                side: const BorderSide(
-                                  color: AppColors.primaryNavy,
-                                ),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                              ),
-                              onPressed: _toggleDiscovery,
-                              icon: const Icon(
-                                Icons.search,
-                                size: 16,
-                                color: AppColors.primaryNavy,
-                              ),
-                              label: const Text(
-                                'Mulai Pemindaian Sekarang',
-                                style: TextStyle(
-                                  color: AppColors.primaryNavy,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ),
-                          ],
                         ],
                       ),
                     )
                   else
-                    ..._physicalPeers.map(
-                      (peer) => _buildPhysicalPeerCard(peer),
-                    ),
+                    ...dedupedPeers.map((peer) {
+                      final routing = ManetRoutingHolder.instance;
+                      final resolvedNodeId = routing.neighborTable
+                          .getNodeIdForEndpoint(peer.endpointId);
+                      final isDup =
+                          (nameCounts[peer.endpointName.trim().toLowerCase()] ??
+                              0) >
+                          1;
+                      return _buildPhysicalPeerCard(
+                        peer,
+                        resolvedNodeId: resolvedNodeId,
+                        isDuplicate: isDup,
+                      );
+                    }),
 
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 14),
 
-                  // Tombol Pindai Perangkat Sekitar
-                  ElevatedButton(
+                  // Tombol Pindai Perangkat Sekitar Utama
+                  ElevatedButton.icon(
                     style: ElevatedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 14),
                       backgroundColor: _isDiscovering
@@ -740,27 +784,21 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
                       side: _isDiscovering
                           ? const BorderSide(color: AppColors.borderLight)
                           : null,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
                     ),
                     onPressed: _toggleDiscovery,
-                    child: Text(
+                    icon: _isDiscovering
+                        ? const Icon(Icons.stop_circle_outlined, size: 18)
+                        : const Icon(Icons.search, size: 18),
+                    label: Text(
                       _isDiscovering
                           ? 'Hentikan Pemindaian'
                           : 'Pindai Perangkat Sekitar',
                       style: const TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-
-                  const SizedBox(height: 6),
-
-                  const Center(
-                    child: Text(
-                      'Koneksi peer-to-peer menggunakan Nearby Connections tanpa kuota internet.',
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: AppColors.textMuted,
                       ),
                     ),
                   ),
@@ -781,7 +819,7 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
     required Color color,
   }) {
     return Container(
-      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 10),
       decoration: BoxDecoration(
         color: AppColors.surface,
         borderRadius: BorderRadius.circular(12),
@@ -792,12 +830,12 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
           Text(
             number,
             style: TextStyle(
-              fontSize: 16,
+              fontSize: 17,
               fontWeight: FontWeight.bold,
               color: color,
             ),
           ),
-          const SizedBox(height: 3),
+          const SizedBox(height: 2),
           Text(
             label,
             style: const TextStyle(
@@ -814,226 +852,196 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
 
   Widget _buildRadioControls() {
     return Container(
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppColors.accentBlue.withValues(alpha: 0.3)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.04),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
-          ),
-        ],
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppColors.borderLight),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Row(
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Row(
-                children: [
-                  Container(
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(
-                      color: (_isAdvertising || _isDiscovering)
-                          ? AppColors.successGreen
-                          : AppColors.textMuted,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  const Text(
-                    'Kontrol Radio Mesh 1-Hop',
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
-                      color: AppColors.primaryNavy,
-                    ),
-                  ),
-                ],
-              ),
-              const StatusBadge(
-                label: 'Nearby P2P_CLUSTER',
-                backgroundColor: AppColors.accentPillBg,
-                textColor: AppColors.accentBlue,
-                fontSize: 9,
-                padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'Komunikasi langsung nirkabel antar-perangkat Android via Bluetooth LE dan Wi-Fi Direct.',
-            style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton(
-                  style: OutlinedButton.styleFrom(
-                    backgroundColor: _isAdvertising
-                        ? AppColors.accentBlue.withValues(alpha: 0.1)
-                        : Colors.transparent,
-                    side: BorderSide(
-                      color: _isAdvertising
-                          ? AppColors.accentBlue
-                          : AppColors.borderLight,
-                    ),
-                    padding: const EdgeInsets.symmetric(vertical: 10),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                  onPressed: _toggleAdvertising,
-                  child: Text(
-                    _isAdvertising ? 'Siaran: AKTIF' : 'Mulai Siaran',
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
-                      color: _isAdvertising
-                          ? AppColors.accentBlue
-                          : AppColors.primaryNavy,
-                    ),
-                  ),
+          Expanded(
+            child: OutlinedButton(
+              style: OutlinedButton.styleFrom(
+                backgroundColor: _isAdvertising
+                    ? AppColors.accentBlue.withValues(alpha: 0.1)
+                    : Colors.transparent,
+                side: BorderSide(
+                  color: _isAdvertising
+                      ? AppColors.accentBlue
+                      : AppColors.borderLight,
+                ),
+                padding: const EdgeInsets.symmetric(vertical: 10),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
                 ),
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: OutlinedButton(
-                  style: OutlinedButton.styleFrom(
-                    backgroundColor: _isDiscovering
-                        ? AppColors.primaryNavy.withValues(alpha: 0.1)
-                        : Colors.transparent,
-                    side: BorderSide(
-                      color: _isDiscovering
-                          ? AppColors.primaryNavy
-                          : AppColors.borderLight,
-                    ),
-                    padding: const EdgeInsets.symmetric(vertical: 10),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                  onPressed: _toggleDiscovery,
-                  child: Text(
-                    _isDiscovering ? 'Pindai: AKTIF' : 'Mulai Pindai',
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
-                      color: AppColors.primaryNavy,
-                    ),
-                  ),
+              onPressed: _toggleAdvertising,
+              child: Text(
+                _isAdvertising ? 'Siaran: AKTIF' : 'Mulai Siaran',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  color: _isAdvertising
+                      ? AppColors.accentBlue
+                      : AppColors.primaryNavy,
                 ),
               ),
-            ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: OutlinedButton(
+              style: OutlinedButton.styleFrom(
+                backgroundColor: _isDiscovering
+                    ? AppColors.primaryNavy.withValues(alpha: 0.1)
+                    : Colors.transparent,
+                side: BorderSide(
+                  color: _isDiscovering
+                      ? AppColors.primaryNavy
+                      : AppColors.borderLight,
+                ),
+                padding: const EdgeInsets.symmetric(vertical: 10),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+              onPressed: _toggleDiscovery,
+              child: Text(
+                _isDiscovering ? 'Pindai: AKTIF' : 'Mulai Pindai',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  color: AppColors.primaryNavy,
+                ),
+              ),
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildPhysicalPeerCard(DiscoveredPeer peer) {
+  Widget _buildPhysicalPeerCard(
+    DiscoveredPeer peer, {
+    String? resolvedNodeId,
+    bool isDuplicate = false,
+  }) {
+    final initials = _getInitials(peer.endpointName);
+    final displayTitle = NodeIdentity.formatDisplayName(
+      peer.endpointName,
+      resolvedNodeId,
+      endpointId: peer.endpointId,
+      isDuplicate: isDuplicate,
+    );
+
+    final isConnected = peer.status == PeerConnectionStatus.connected;
+    final isConnecting = peer.status == PeerConnectionStatus.connecting;
+
     return Container(
-      margin: const EdgeInsets.only(bottom: 10),
+      margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: AppColors.surface,
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
-          color: peer.status == PeerConnectionStatus.connected
-              ? AppColors.successGreen.withValues(alpha: 0.5)
+          color: isConnected
+              ? AppColors.successGreen.withValues(alpha: 0.4)
               : AppColors.borderLight,
         ),
       ),
       child: Row(
         children: [
-          Container(
-            width: 38,
-            height: 38,
-            decoration: BoxDecoration(
-              color: peer.status == PeerConnectionStatus.connected
-                  ? AppColors.successGreen.withValues(alpha: 0.15)
-                  : AppColors.accentBlue.withValues(alpha: 0.15),
-              shape: BoxShape.circle,
-            ),
-            child: Icon(
-              Icons.phone_android,
-              size: 20,
-              color: peer.status == PeerConnectionStatus.connected
-                  ? AppColors.successGreen
-                  : AppColors.accentBlue,
+          // Avatar Berinisial
+          CircleAvatar(
+            radius: 19,
+            backgroundColor: isConnected
+                ? AppColors.successGreen
+                : (isConnecting
+                      ? AppColors.warningOrange
+                      : AppColors.primaryNavy),
+            child: Text(
+              initials,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+              ),
             ),
           ),
           const SizedBox(width: 12),
+          // Info Peer
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  peer.endpointName,
+                  displayTitle,
                   style: const TextStyle(
                     fontSize: 14,
                     fontWeight: FontWeight.bold,
                     color: AppColors.primaryNavy,
                   ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  peer.status == PeerConnectionStatus.connected
-                      ? 'ID: #${peer.endpointId} • Terhubung Langsung'
-                      : (peer.status == PeerConnectionStatus.connecting
-                            ? 'ID: #${peer.endpointId} • Menghubungkan...'
-                            : 'ID: #${peer.endpointId} • Sinyal Terdeteksi'),
-                  style: const TextStyle(
+                  isConnected
+                      ? 'Terhubung Langsung'
+                      : (isConnecting
+                            ? 'Menghubungkan...'
+                            : 'Sinyal Ditemukan'),
+                  style: TextStyle(
                     fontSize: 11,
-                    color: AppColors.textMuted,
+                    color: isConnected
+                        ? AppColors.successGreen
+                        : (isConnecting
+                              ? AppColors.warningOrange
+                              : AppColors.textMuted),
+                    fontWeight: isConnected
+                        ? FontWeight.w600
+                        : FontWeight.normal,
                   ),
                 ),
               ],
             ),
           ),
           const SizedBox(width: 8),
-          if (peer.status == PeerConnectionStatus.connected) ...[
-            InkWell(
-              onTap: () => _openChatWithPhysicalPeer(peer),
-              borderRadius: BorderRadius.circular(16),
-              child: Container(
+          // Tombol Aksi
+          if (isConnected) ...[
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.primaryNavy,
+                foregroundColor: Colors.white,
                 padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
+                  horizontal: 12,
                   vertical: 6,
                 ),
-                decoration: BoxDecoration(
-                  color: AppColors.primaryNavy,
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: const Text(
-                  'Kirim Pesan',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                  ),
+                minimumSize: const Size(0, 32),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
                 ),
               ),
-            ),
-            const SizedBox(width: 6),
-            InkWell(
-              onTap: () => _disconnectPhysicalPeer(peer),
-              child: const Padding(
-                padding: EdgeInsets.all(4),
-                child: Icon(
-                  Icons.close,
-                  size: 18,
-                  color: AppColors.emergencyRed,
-                ),
+              onPressed: () => _openChatWithPhysicalPeer(peer),
+              child: const Text(
+                'Kirim Pesan',
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
               ),
             ),
-          ] else if (peer.status == PeerConnectionStatus.connecting) ...[
+            const SizedBox(width: 4),
+            IconButton(
+              icon: const Icon(
+                Icons.close,
+                size: 18,
+                color: AppColors.emergencyRed,
+              ),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+              tooltip: 'Putuskan Koneksi',
+              onPressed: () => _disconnectPhysicalPeer(peer),
+            ),
+          ] else if (isConnecting) ...[
             const StatusBadge(
               label: 'Menghubungkan...',
               backgroundColor: AppColors.warningOrangeLight,
@@ -1042,29 +1050,25 @@ class _MeshDevicesScreenState extends State<MeshDevicesScreen>
               padding: EdgeInsets.symmetric(horizontal: 8, vertical: 3),
             ),
           ] else ...[
-            InkWell(
-              onTap: () => _connectToPhysicalPeer(peer),
-              borderRadius: BorderRadius.circular(16),
-              child: Container(
+            OutlinedButton(
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppColors.accentBlue,
+                side: BorderSide(
+                  color: AppColors.accentBlue.withValues(alpha: 0.5),
+                ),
                 padding: const EdgeInsets.symmetric(
                   horizontal: 12,
                   vertical: 6,
                 ),
-                decoration: BoxDecoration(
-                  color: AppColors.accentPillBg,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(
-                    color: AppColors.accentBlue.withValues(alpha: 0.4),
-                  ),
+                minimumSize: const Size(0, 32),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
                 ),
-                child: const Text(
-                  'Hubungkan',
-                  style: TextStyle(
-                    color: AppColors.accentBlue,
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
+              ),
+              onPressed: () => _connectToPhysicalPeer(peer),
+              child: const Text(
+                'Hubungkan',
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
               ),
             ),
           ],
